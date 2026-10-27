@@ -425,7 +425,6 @@ int ObExprAIRerank::inner_eval_ai_rerank(ObIAllocator &allocator,
 int ObExprAIRerank::batch_result_add_base(ObIAllocator &allocator, ObJsonArray *array, int64_t start_idx)
 {
   INIT_SUCC(ret);
-  UNUSED(allocator);
   int64_t count = array->element_count();
   ObString index_key(INDEX_KEY);
   for (int64_t i = 0; OB_SUCC(ret) && i < count; i++) {
@@ -438,9 +437,12 @@ int ObExprAIRerank::batch_result_add_base(ObIAllocator &allocator, ObJsonArray *
       if (OB_ISNULL(index_node) || index_node->json_type() != ObJsonNodeType::J_INT) {
         ret = OB_INVALID_DATA;
       } else {
-        ObJsonInt *int_obj = static_cast<ObJsonInt *>(index_node);
-        int64_t id = int_obj->value() + start_idx;
-        int_obj->set_value(id);
+        const int64_t id = index_node->get_int() + start_idx;
+        ObJsonInt *new_index = nullptr;
+        if (OB_FAIL(ObAIFuncJsonUtils::get_json_int(allocator, id, new_index))) {
+        } else if (OB_FAIL(obj->remove(index_key))) {
+        } else if (OB_FAIL(obj->add(index_key, new_index))) {
+        }
       }
     }
   }
