@@ -53,7 +53,7 @@ int ObExprAIEmbed::calc_result_typeN(ObExprResType &type,
     LOG_USER_ERROR(OB_ERR_PARAM_SIZE, func_name_.length(), func_name_.ptr());
   } else {
     if (!ob_is_string_tc(types_stack[MODEL_IDX].get_type())
-        || !ob_is_string_tc(types_stack[CONTENT_IDX].get_type())) {
+        || !ob_is_string_type(types_stack[CONTENT_IDX].get_type())) {
       ret = OB_ERR_INVALID_TYPE_FOR_OP;
     }
     types_stack[MODEL_IDX].set_calc_type(ObVarcharType);
