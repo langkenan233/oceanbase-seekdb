@@ -102,10 +102,20 @@ int TokenizeContext::current_char_type(ObFTCharUtil::CharType &type)
 int TokenizeContext::prepare_next_char()
 {
   int ret = OB_SUCCESS;
-  if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
-                                          fulltext_ + cursor_,
-                                          fulltext_len_ - cursor_,
-                                          next_char_len_))) {
+  const unsigned char ch = static_cast<unsigned char>(fulltext_[cursor_]);
+  if (ObCharset::charset_type_by_coll(coll_type_) == CHARSET_UTF8MB4 && ch < 0x80) {
+    next_char_len_ = 1;
+    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) {
+      next_char_type_ = ObFTCharUtil::CharType::ENGLISH_LETTER;
+    } else if (ch >= '0' && ch <= '9') {
+      next_char_type_ = ObFTCharUtil::CharType::ARABIC_LETTER;
+    } else {
+      next_char_type_ = ObFTCharUtil::CharType::USELESS;
+    }
+  } else if (OB_FAIL(ObCharset::first_valid_char(coll_type_,
+                                                 fulltext_ + cursor_,
+                                                 fulltext_len_ - cursor_,
+                                                 next_char_len_))) {
   } else if (OB_FAIL(ObFTCharUtil::classify_first_char(coll_type_,
                                                        fulltext_ + cursor_,
                                                        next_char_len_,

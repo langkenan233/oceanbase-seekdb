@@ -473,6 +473,15 @@ inline int ObFTCharUtil::classify_first_char(ObCollationType coll_type,
   int ret = OB_SUCCESS;
   ObCharsetType cs_type = ObCharset::charset_type_by_coll(coll_type);
 
+  if (cs_type == CHARSET_UTF8MB4 && nullptr != input && char_len == 1 &&
+      static_cast<unsigned char>(*input) < 0x80) {
+    const unsigned char ch = static_cast<unsigned char>(*input);
+    type = ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z'))
+               ? CharType::ENGLISH_LETTER
+               : (ch >= '0' && ch <= '9') ? CharType::ARABIC_LETTER : CharType::USELESS;
+    return ret;
+  }
+
   switch (cs_type) {
   case CHARSET_UTF8MB4: {
     ret = do_classify<CHARSET_UTF8MB4>(input, char_len, type);

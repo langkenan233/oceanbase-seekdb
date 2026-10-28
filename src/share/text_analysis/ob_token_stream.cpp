@@ -18,6 +18,7 @@
 
 #include "share/text_analysis/ob_token_stream.h"
 #include "share/rc/ob_server_runtime.h"
+#include "lib/charset/ob_charset.h"
 
 namespace oceanbase
 {
@@ -95,10 +96,13 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
   } else {
     const char *doc = input_doc_->ptr_;
     const uint32_t doc_len = get_input_buf_len();
+    const bool is_utf8mb4 = ObCharset::charset_type_by_coll(
+        static_cast<common::ObCollationType>(cs_->number)) == common::CHARSET_UTF8MB4;
     int64_t token_len = 0;
     // to next non-whitespace pos
     while (OB_SUCC(ret) && found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = is_utf8mb4 && static_cast<unsigned char>(doc[trav_pos_]) < 0x80
+                                ? 1 : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {// if char is invalid, just skip the rest of document
         iter_end_ = true;
@@ -112,7 +116,8 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
     // to next whitespace pos
     while (OB_SUCC(ret) && !found_delimiter()) {
-      const int64_t c_len = ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
+      const int64_t c_len = is_utf8mb4 && static_cast<unsigned char>(doc[trav_pos_]) < 0x80
+                                ? 1 : ob_mbcharlen_ptr(cs_, doc + trav_pos_, doc + doc_len);
       trav_pos_ += c_len;
       token_len += c_len;
       if (trav_pos_ >= doc_len || 0 == c_len) {
