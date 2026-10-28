@@ -2,8 +2,10 @@
 #owner group: shenzhen
 
 connection default;
+--disable_query_log
 
 # AI_PROMPT: JSON 参数、重复占位符和 LOB 输入
+--echo PROMPT
 select ai_prompt('{0}/{0}/{1}', json_array(1,true), json_object('k',2));
 --disable_warnings
 drop table if exists ai_enhance_prompt;
@@ -14,6 +16,7 @@ select ai_prompt(t, a) from ai_enhance_prompt;
 drop table ai_enhance_prompt;
 
 # OpenAI completion/embed/rerank mock endpoints
+--echo COMPLETE
 --error 0,11118
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_complete');
 --error 0,11112
@@ -29,6 +32,7 @@ select length(ai_complete(
 
 --error 0,11118
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_embed');
+--echo EMBED
 --error 0,11112
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_embed_ep');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
@@ -50,6 +54,7 @@ drop table ai_enhance_batch;
 
 --error 0,11118
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_rerank');
+--echo RERANK
 --error 0,11112
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_rerank_ep');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
@@ -65,6 +70,7 @@ select json_unquote(json_extract(r, '$[0].id')) as first_id,
         'text') as r) x;
 
 # Ollama provider: access_key 可为空，completion/embed 走原生协议
+--echo OLLAMA_COMPLETE
 --error 0,11118
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_complete');
 --error 0,11112
@@ -83,6 +89,7 @@ select length(ai_complete('enhance_ollama_complete', 'hello')) > 0 as ollama_com
 
 --error 0,11118
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_embed');
+--echo OLLAMA_EMBED
 --error 0,11112
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_embed_ep');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
@@ -101,3 +108,4 @@ call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_complete');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep');
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_embed');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_embed_ep');
+--enable_query_log
