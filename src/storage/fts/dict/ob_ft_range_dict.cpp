@@ -381,23 +381,25 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
-  bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
+  // Ranges are loaded in dictionary order. Find the first range whose end
+  // is at or after the character, then verify its lower bound.
+  int64_t left = 0;
+  int64_t right = range_dicts_.size();
+  while (left < right) {
+    const int64_t mid = left + (right - left) / 2;
     if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
-      dict = range_dicts_[i].dict_;
-      found = true;
+                          range_dicts_[mid].end_.get_word(), single_word) < 0) {
+      left = mid + 1;
+    } else {
+      right = mid;
     }
   }
-  if (!found) {
-    // not found, dis match
+  if (left == range_dicts_.size() ||
+      ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
+                        range_dicts_[left].start_.get_word(), single_word) > 0) {
     ret = OB_ENTRY_NOT_EXIST;
+  } else {
+    dict = range_dicts_[left].dict_;
   }
   return ret;
 }
