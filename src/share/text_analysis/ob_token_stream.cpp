@@ -136,10 +136,9 @@ int ObTextWhitespaceTokenizer::get_next(ObDatum &next_token, int64_t &token_freq
 
 bool ObTextWhitespaceTokenizer::found_delimiter()
 {
-  bool found = false;
-  const char *curr_char = input_doc_->ptr_ + trav_pos_;
-  found = ob_isspace(cs_, *curr_char) || ob_iscntrl(cs_, *curr_char) || ob_ispunct(cs_, *curr_char);
-  return found;
+  const unsigned char ch = static_cast<unsigned char>(input_doc_->ptr_[trav_pos_]);
+  return nullptr != cs_->ctype &&
+      0 != (cs_->ctype[ch + 1] & (_MY_SPC | _MY_CTR | _MY_PNT));
 }
 
 ObTokenNormalizer::ObTokenNormalizer()
@@ -210,7 +209,8 @@ int ObTokenStopWordNormalizer::filter_special_marks(const ObDatum &check_token, 
   int64_t special_mark_cnt = 0;
   for (int64_t i = 0; i < token_len; ++i) {
     const char *character = token + i;
-    if (ob_ispunct(cs_, *character) || ob_iscntrl(cs_, *character)) {
+    if (nullptr != cs_->ctype &&
+        0 != (cs_->ctype[static_cast<unsigned char>(*character) + 1] & (_MY_PNT | _MY_CTR))) {
       special_mark_cnt++;
     }
   }
