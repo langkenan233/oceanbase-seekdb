@@ -74,35 +74,41 @@ void ObStopWordChecker::destroy()
 int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
 {
   int ret = OB_SUCCESS;
-  
-  
-  common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
   if (OB_UNLIKELY(!inited_)) {
     ret = OB_NOT_INIT;
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    common::ObString cmp_str;
-    // do nothing set out with in if type is the same.
-    if (OB_FAIL(common::ObCharset::charset_convert(
-                                       allocator,
-                                       word.get_word().get_string(),
-                                       word.get_collation_type(),
-                                       stopword_type_.get_collation_type(),
-                                       cmp_str))) {
-    } else {
-      ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
+    const ObCollationType source_type = word.get_collation_type();
+    const ObCollationType stopword_type = stopword_type_.get_collation_type();
+    // The stopword set uses utf8mb4. A different collation of the same
+    // charset needs no byte conversion; avoid constructing an arena per word.
+    if (ObCharset::charset_type_by_coll(source_type) ==
+        ObCharset::charset_type_by_coll(stopword_type)) {
+      const ObString str = word.get_word().get_string();
+      ObFTWord converted(str.length(), str.ptr(), stopword_type_);
       ret = stopword_set_.exist_refactored(converted);
-      if (OB_HASH_NOT_EXIST == ret) {
-        is_stopword = false;
-        ret = OB_SUCCESS;
-      } else if (OB_HASH_EXIST == ret) {
-        is_stopword = true;
-        ret = OB_SUCCESS;
-      } else if (OB_SUCC(ret)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else {
+    } else {
+      common::ObArenaAllocator allocator(lib::ObMemAttr("ChkStopWord"));
+      ObString cmp_str;
+      ret = ObCharset::charset_convert(allocator,
+                                       word.get_word().get_string(),
+                                       source_type,
+                                       stopword_type,
+                                       cmp_str);
+      if (OB_SUCC(ret)) {
+        ObFTWord converted(cmp_str.length(), cmp_str.ptr(), stopword_type_);
+        ret = stopword_set_.exist_refactored(converted);
       }
+    }
+    if (OB_HASH_NOT_EXIST == ret) {
+      is_stopword = false;
+      ret = OB_SUCCESS;
+    } else if (OB_HASH_EXIST == ret) {
+      is_stopword = true;
+      ret = OB_SUCCESS;
+    } else if (OB_SUCC(ret)) {
+      ret = OB_ERR_UNEXPECTED;
     }
   }
   return ret;
@@ -138,10 +144,18 @@ int ObAddWord::process_word(
   bool is_stopword = false;
   ObFTWord src_word(word_len, word, word_meta_);
   ObFTWord dst_word;
+  int64_t *existing_word_count = nullptr;
   if (OB_ISNULL(word) || OB_UNLIKELY(0 >= word_len || 0 >= char_cnt || 0 >= word_freq)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (is_min_max_word(char_cnt)) {
     ++min_max_word_cnt_;
+  } else if (flag_.groupby_word() && flag_.casedown() &&
+             nullptr != (existing_word_count = word_map_.get(src_word))) {
+    // Only accepted words are present in the map. Repeated IK words can
+    // bypass the allocation for another lowercase copy. Different spellings
+    // under a binary collation fall through to the normal conversion path.
+    *existing_word_count += word_freq;
+    non_stopword_cnt_ += word_freq;
   } else if (OB_FAIL(casedown_word(src_word, dst_word))) {
   } else if (OB_FAIL(check_stopword(dst_word, is_stopword))) {
   } else if (OB_UNLIKELY(is_stopword)) {
@@ -219,7 +233,7 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
           stored_word = ObFTWord(token.length(), buf, word_meta_);
         }
       }
-      if (OB_SUCC(ret) && OB_FAIL(word_map_.set_refactored(stored_word, 1/*word count*/))) {
+      if (OB_SUCC(ret) && OB_FAIL(word_map_.set_refactored(stored_word, word_freq))) {
       }
     }
   }
