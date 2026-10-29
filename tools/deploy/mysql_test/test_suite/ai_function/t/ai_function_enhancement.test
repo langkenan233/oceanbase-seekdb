@@ -26,6 +26,12 @@ select length(ai_complete('enhance_complete', 'hello', null)) > 0 as complete_ok
 select length(ai_complete(
   'enhance_complete', ai_prompt('describe {0}', json_object('text','你好')),
   '{"temperature":0.2,"max_tokens":16}')) > 0 as complete_config_ok;
+select length(ai_complete('enhance_complete',
+  ai_prompt('repeat {0} {0}', json_array(1,true)))) > 0 as prompt_repeat_ok;
+select length(ai_complete('enhance_complete',
+  ai_prompt('outer {0}', ai_prompt('inner {0}', 'value')))) > 0 as nested_prompt_ok;
+select length(ai_complete('enhance_complete',
+  ai_prompt('{{literal}} {0}', 'value'))) > 0 as escaped_prompt_ok;
 
 --error 0,11118
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_embed');
@@ -63,6 +69,10 @@ select json_unquote(json_extract(r, '$[0].id')) as first_id,
   from (select ai_rerank('enhance_rerank','apple',
         '[{"id":"a","text":"apple"},{"id":"b","text":"banana"}]',
         'text') as r) x;
+select json_length(ai_rerank('enhance_rerank', 'apple',
+       json_array('0','1','2','3','4','5','6','7','8','9',
+                  '10','11','12','13','14','15','16','17','18','19','20'),
+       null)) as rerank_multi_batch_count;
 
 # Ollama provider: access_key 可为空，completion/embed 走原生协议
 --error 0,11118

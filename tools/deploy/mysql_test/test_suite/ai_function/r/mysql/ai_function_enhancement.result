@@ -22,6 +22,18 @@ select length(ai_complete(
 '{"temperature":0.2,"max_tokens":16}')) > 0 as complete_config_ok;
 complete_config_ok
 1
+select length(ai_complete('enhance_complete',
+ai_prompt('repeat {0} {0}', json_array(1,true)))) > 0 as prompt_repeat_ok;
+prompt_repeat_ok
+1
+select length(ai_complete('enhance_complete',
+ai_prompt('outer {0}', ai_prompt('inner {0}', 'value')))) > 0 as nested_prompt_ok;
+nested_prompt_ok
+1
+select length(ai_complete('enhance_complete',
+ai_prompt('{{literal}} {0}', 'value'))) > 0 as escaped_prompt_ok;
+escaped_prompt_ok
+1
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_embed');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_embed_ep');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
@@ -61,6 +73,12 @@ from (select ai_rerank('enhance_rerank','apple',
 'text') as r) x;
 first_id	rerank_count
 a	2
+select json_length(ai_rerank('enhance_rerank', 'apple',
+json_array('0','1','2','3','4','5','6','7','8','9',
+'10','11','12','13','14','15','16','17','18','19','20'),
+null)) as rerank_multi_batch_count;
+rerank_multi_batch_count
+21
 call DBMS_AI_SERVICE.DROP_AI_MODEL('enhance_ollama_complete');
 call DBMS_AI_SERVICE.DROP_AI_MODEL_ENDPOINT('enhance_ollama_complete_ep');
 call DBMS_AI_SERVICE.CREATE_AI_MODEL(
