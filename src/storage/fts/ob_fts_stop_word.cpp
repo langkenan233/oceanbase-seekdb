@@ -198,33 +198,29 @@ int ObAddWord::check_stopword(const ObFTWord &ft_word, bool &is_stopword)
 int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
 {
   int ret = OB_SUCCESS;
-  int64_t word_count = 0;
   if (OB_UNLIKELY(word.empty() || word_freq <= 0)) {
     ret = OB_INVALID_ARGUMENT;
   } else if (!flag_.groupby_word()) {
     if (OB_FAIL(word_map_.set_refactored(word, 1/*word count*/))) {
     }
-  } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
   } else {
-    const bool is_new_word = OB_HASH_NOT_EXIST == ret;
-    ret = OB_SUCCESS;
-    if (is_new_word) {
-      word_count = 1;
+    int64_t *word_count = word_map_.get(word);
+    if (nullptr != word_count) {
+      *word_count += word_freq;
     } else {
-      word_count += word_freq;
-    }
-    ObFTWord stored_word = word;
-    if (is_new_word && flag_.copy_word_on_insert()) {
-      const ObString token = word.get_word().get_string();
-      char *buf = static_cast<char *>(allocator_.alloc(token.length()));
-      if (OB_ISNULL(buf)) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else {
-        MEMCPY(buf, token.ptr(), token.length());
-        stored_word = ObFTWord(token.length(), buf, word_meta_);
+      ObFTWord stored_word = word;
+      if (flag_.copy_word_on_insert()) {
+        const ObString token = word.get_word().get_string();
+        char *buf = static_cast<char *>(allocator_.alloc(token.length()));
+        if (OB_ISNULL(buf)) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else {
+          MEMCPY(buf, token.ptr(), token.length());
+          stored_word = ObFTWord(token.length(), buf, word_meta_);
+        }
       }
-    }
-    if (OB_SUCC(ret) && OB_FAIL(word_map_.set_refactored(stored_word, word_count, 1/*overwrite*/))) {
+      if (OB_SUCC(ret) && OB_FAIL(word_map_.set_refactored(stored_word, 1/*word count*/))) {
+      }
     }
   }
   return ret;
