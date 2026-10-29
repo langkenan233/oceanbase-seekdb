@@ -206,12 +206,25 @@ int ObAddWord::groupby_word(const ObFTWord &word, const int64_t word_freq)
     }
   } else if (OB_FAIL(word_map_.get_refactored(word, word_count)) && OB_HASH_NOT_EXIST != ret) {
   } else {
-    if (OB_HASH_NOT_EXIST == ret) {
+    const bool is_new_word = OB_HASH_NOT_EXIST == ret;
+    ret = OB_SUCCESS;
+    if (is_new_word) {
       word_count = 1;
     } else {
       word_count += word_freq;
     }
-    if (OB_FAIL(word_map_.set_refactored(word, word_count, 1/*overwrite*/))) {
+    ObFTWord stored_word = word;
+    if (is_new_word && flag_.copy_word_on_insert()) {
+      const ObString token = word.get_word().get_string();
+      char *buf = static_cast<char *>(allocator_.alloc(token.length()));
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        MEMCPY(buf, token.ptr(), token.length());
+        stored_word = ObFTWord(token.length(), buf, word_meta_);
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(word_map_.set_refactored(stored_word, word_count, 1/*overwrite*/))) {
     }
   }
   return ret;
