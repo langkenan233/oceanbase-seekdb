@@ -94,6 +94,10 @@
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/resolver/dcl/ob_alter_role_resolver.h"
 #include "sql/pl/ob_pl_package.h"
+#include "sql/parser/ob_parser.h"
+#include "lib/string/ob_sql_string.h"
+#include "sql/resolver/dml/ob_select_resolver.h"
+#include "sql/engine/basic/ob_file_scan_utils.h"
 
 namespace oceanbase
 {
@@ -109,6 +113,171 @@ ObResolver::ObResolver(ObResolverParams &params)
 
 ObResolver::~ObResolver()
 {
+}
+
+namespace
+{
+
+// Maps a resolved expression onto the type name shown by DESCRIBE SELECT.
+const char *describe_type_name(const ObObjType type)
+{
+  const char *name = "VARCHAR";
+  switch (type) {
+    case ObTinyIntType:
+    case ObSmallIntType:
+    case ObMediumIntType:
+    case ObInt32Type:
+    case ObIntType:
+    case ObUTinyIntType:
+    case ObUSmallIntType:
+    case ObUMediumIntType:
+    case ObUInt32Type:
+    case ObUInt64Type: name = "BIGINT"; break;
+    case ObFloatType:
+    case ObDoubleType: name = "DOUBLE"; break;
+    case ObNumberType:
+    case ObUNumberType:
+    case ObDecimalIntType: name = "DECIMAL"; break;
+    case ObDateType: name = "DATE"; break;
+    case ObDateTimeType:
+    case ObTimestampType: name = "DATETIME"; break;
+    case ObTimeType: name = "TIME"; break;
+    default: name = "VARCHAR"; break;
+  }
+  return name;
+}
+
+// Appends a back quoted identifier, doubling the embedded back quotes.
+int append_quoted_identifier(ObSqlString &sql, const ObString &name)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(sql.append("`"))) {
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < name.length(); ++i) {
+    if ('`' == name[i] && OB_FAIL(sql.append("``"))) {
+    } else if ('`' != name[i] && OB_FAIL(sql.append(name.ptr() + i, 1))) {
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(sql.append("`"))) {
+  }
+  return ret;
+}
+
+// Appends a single quoted string literal, escaping quotes and backslashes.
+int append_string_literal(ObSqlString &sql, const ObString &value)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(sql.append("'"))) {
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < value.length(); ++i) {
+    if ('\'' == value[i] && OB_FAIL(sql.append("''"))) {
+    } else if ('\\' == value[i] && OB_FAIL(sql.append("\\\\"))) {
+    } else if ('\'' != value[i] && '\\' != value[i] && OB_FAIL(sql.append(value.ptr() + i, 1))) {
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(sql.append("'"))) {
+  }
+  return ret;
+}
+
+// A file table column knows its logical type (BOOLEAN, DATE, ...) which is more
+// precise than the physical column type, so prefer it when it is available.
+const char *describe_file_column_type(const ObDMLStmt *stmt, const ObRawExpr *expr, bool &found)
+{
+  const char *name = NULL;
+  found = false;
+  if (NULL != stmt && NULL != expr && T_REF_COLUMN == expr->get_expr_type()) {
+    const ObColumnRefRawExpr *column_expr = static_cast<const ObColumnRefRawExpr *>(expr);
+    const TableItem *table_item = stmt->get_table_item_by_id(column_expr->get_table_id());
+    if (NULL != table_item && table_item->is_file_table() && NULL != table_item->file_table_def_) {
+      const ObFileTableDef *def = table_item->file_table_def_;
+      for (int64_t i = 0; i < def->cols_.count(); ++i) {
+        if (def->cols_.at(i).column_id_ == column_expr->get_column_id()) {
+          name = ob_file_scan_type_name(static_cast<ObFileScanType>(def->cols_.at(i).type_));
+          found = true;
+          break;
+        }
+      }
+    }
+  }
+  return name;
+}
+
+} // namespace
+
+// DESCRIBE SELECT resolves the inner statement, then rewrites it into a UNION
+// ALL of constant rows that describe the output columns.
+int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&stmt)
+{
+  int ret = OB_SUCCESS;
+  const ParseNode *select_node = NULL;
+  ObStmt *inner_stmt = NULL;
+  stmt = NULL;
+  if (1 != parse_tree.num_child_) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid describe select statement", K(ret), K(parse_tree.num_child_));
+  } else if (OB_ISNULL(select_node = parse_tree.children_[0])) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(ObResolver(params_).resolve(IS_NOT_PREPARED_STMT, *select_node, inner_stmt))) {
+    LOG_WARN("resolve inner select stmt failed", K(ret));
+  } else if (OB_ISNULL(inner_stmt) || !inner_stmt->is_select_stmt()) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("describe expects a select statement", K(ret), KP(inner_stmt));
+  } else {
+    const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(inner_stmt);
+    ObSqlString sql;
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+      const SelectItem &item = select_stmt->get_select_item(i);
+      const ObRawExpr *expr = item.expr_;
+      if (OB_ISNULL(expr)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        bool is_file_column = false;
+        const char *type_name = describe_file_column_type(select_stmt, expr, is_file_column);
+        if (!is_file_column) {
+          type_name = describe_type_name(expr->get_result_type().get_type());
+        }
+        const bool not_null = expr->get_result_type().has_result_flag(NOT_NULL_FLAG);
+        if (OB_FAIL(sql.append(0 == i ? "select " : " union all select "))) {
+        } else if (OB_FAIL(append_string_literal(sql, item.alias_name_))) {
+        } else if (OB_FAIL(sql.append(" as `column_name`, "))) {
+        } else if (OB_FAIL(append_string_literal(sql, ObString(static_cast<int32_t>(strlen(type_name)),
+                                                              const_cast<char *>(type_name))))) {
+        } else if (OB_FAIL(sql.append(" as `column_type`, "))) {
+        } else if (OB_FAIL(sql.append(not_null ? "'NO'" : "'YES'"))) {
+        } else if (OB_FAIL(sql.append(" as `null`, "))) {
+        } else if (OB_FAIL(sql.append("cast(NULL as binary(0)) as `key`, "
+                                      "cast(NULL as binary(0)) as `default`, "
+                                      "cast(NULL as binary(0)) as `extra`"))) {
+        }
+      }
+    }
+    if (OB_SUCC(ret) && 0 == select_stmt->get_select_item_size()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("describe select has no output column", K(ret));
+    }
+    ObString sql_str(sql.length(), sql.ptr());
+    ParseResult *parse_result = NULL;
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(parse_result = static_cast<ParseResult *>(
+                             params_.allocator_->alloc(sizeof(ParseResult))))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMSET(parse_result, 0, sizeof(ParseResult));
+      ObParser parser(*params_.allocator_, params_.session_info_->get_sql_mode());
+      if (OB_FAIL(parser.parse(sql_str, *parse_result))) {
+        LOG_WARN("parse describe select failed", K(ret), K(sql));
+      } else if (OB_ISNULL(parse_result->result_tree_)
+                 || OB_ISNULL(parse_result->result_tree_->children_[0])) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(ObResolver(params_).resolve(IS_NOT_PREPARED_STMT,
+                                                     *parse_result->result_tree_->children_[0],
+                                                     stmt))) {
+        LOG_WARN("resolve describe select failed", K(ret), K(sql));
+      }
+    }
+  }
+  return ret;
 }
 
 template <typename ResolverType>
@@ -236,6 +405,10 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_SELECT: {
         REGISTER_SELECT_STMT_RESOLVER(Select);
+        break;
+      }
+      case T_DESCRIBE_SELECT_STMT: {
+        ret = resolve_describe_select(parse_tree, stmt);
         break;
       }
       case T_INSERT: {

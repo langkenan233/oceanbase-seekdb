@@ -10886,6 +10886,19 @@
     "background_cn": "",
     "ref_url": "https://dev.mysql.com/doc/refman/5.7/en/server-system-variables.html"
   },
+  "enable_file_sql": {
+    "id": 10754,
+    "name": "enable_file_sql",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "Whether file table functions such as read_csv, read_json and read_parquet can be used.",
+    "flags": "GLOBAL | SESSION | NEED_SERIALIZE",
+    "publish_version": "",
+    "info_cn": "是否允许使用 read_csv、read_json、read_parquet 与 glob 等文件表函数",
+    "background_cn": "",
+    "ref_url": ""
+  },
   "enable_optimizer_rowgoal": {
     "id": 10747,
     "name": "enable_optimizer_rowgoal",

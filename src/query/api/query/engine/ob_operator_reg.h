@@ -520,8 +520,13 @@ REGISTER_OPERATOR(ObLogStatCollector, PHY_STAT_COLLECTOR, ObStatCollectorSpec, O
                   VECTORIZED_OP);
 
 class ObLogJsonTable;
+class ObLogFileTable;
 class ObJsonTableSpec;
+class ObFileTableOp;
+class ObFileTableSpec;
 class ObJsonTableOp;
+REGISTER_OPERATOR(ObLogFileTable, PHY_FILE_TABLE, ObFileTableSpec,
+                  ObFileTableOp, NOINPUT);
 REGISTER_OPERATOR(ObLogJsonTable, PHY_JSON_TABLE, ObJsonTableSpec,
                   ObJsonTableOp, NOINPUT);
 

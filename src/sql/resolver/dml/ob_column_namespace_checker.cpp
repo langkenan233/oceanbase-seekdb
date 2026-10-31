@@ -253,6 +253,8 @@ int ObColumnNamespaceChecker::check_using_column_namespace(const ObString &colum
     used to indicate whether we could skip the duplicable column.  
     This param is true only when this funciton is called by resolve_star(may be indirectly called)
 */
+
+
 int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, const ObString &col_name, bool &is_exist,
                                                   const bool skip_join_dup/*default false */)
 {
@@ -324,6 +326,19 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
                                                                 params_,
                                                                 col_name,
                                                                 is_exist))) {
+    }
+  } else if (table_item.is_file_table()) {
+    // file table columns come from the file schema inferred at resolve time
+    const ObFileTableDef *ft_def = table_item.file_table_def_;
+    if (OB_ISNULL(ft_def)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("file table def is null", K(ret), K(table_item.table_id_));
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && !is_exist && i < ft_def->cols_.count(); ++i) {
+        if (ObCharset::case_insensitive_equal(ft_def->cols_.at(i).col_name_, col_name)) {
+          is_exist = true;
+        }
+      }
     }
   } else if (table_item.is_values_table()) {
     ObSEArray<ObColumnRefRawExpr *, 4> values_desc;

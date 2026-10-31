@@ -72,6 +72,10 @@ public:
       }
     }
   }
+  inline int set_column_names(const common::ObIArray<common::ObString> &column_names)
+  {
+    return column_names_.assign(column_names);
+  }
   inline void set_is_optional(bool is_optional)
   {
     is_optional_ = is_optional;
@@ -128,6 +132,10 @@ public:
   {
     return user_vars_;
   }
+  inline const common::ObIArray<common::ObString> &get_column_names() const
+  {
+    return column_names_;
+  }
   inline bool get_is_optional() const
   {
     return is_optional_;
@@ -179,6 +187,7 @@ private:
   common::ObObj line_str_;
   common::ObSEArray<ObRawExpr*, 8, common::ModulePageAllocator, true> select_exprs_;
   common::ObSEArray<common::ObString, 16, common::ModulePageAllocator, true> user_vars_;
+  common::ObSEArray<common::ObString, 16, common::ModulePageAllocator, true> column_names_;
   common::ObObj closed_cht_;
   bool is_optional_;
   bool is_single_;

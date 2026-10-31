@@ -39,6 +39,7 @@ public:
   virtual ~ObResolver();
 
   virtual int resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObStmt *&stmt);
+  int resolve_describe_select(const ParseNode &parse_tree, ObStmt *&stmt);
   ObResolverParams &get_params() { return params_; }
 
 private:

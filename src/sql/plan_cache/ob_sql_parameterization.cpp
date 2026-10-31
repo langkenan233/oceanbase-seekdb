@@ -335,6 +335,9 @@ bool ObSqlParameterization::is_tree_not_param(const ParseNode *tree)
     ret_bool = true;
   } else if (T_EXTERNAL_FILE_FORMAT == tree->type_) {
     ret_bool = true;
+  } else if (T_FILE_TABLE_EXPRESSION == tree->type_) {
+    // the resolver reads the file options straight from the parse tree
+    ret_bool = true;
   } else if (T_CHAR_CHARSET == tree->type_) {
     ret_bool = true;
   } else if (T_WIN_NAMED_WINDOWS == tree->type_) {//name window cannot be parameterized because the order of parameterization cannot be guaranteed

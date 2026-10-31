@@ -101,8 +101,46 @@ typedef struct ObJsonTableDef {
   common::ObSEArray<ObString, 16, common::ModulePageAllocator, true> namespace_arr_;
 } ObJsonTableDef;
 
-struct ObValuesTableDef {
-  ObValuesTableDef() : start_param_idx_(-1), end_param_idx_(-1), column_cnt_(0), row_cnt_(0),
+// A table function that reads a local file as a table. The column list is
+// inferred from the file when the statement is resolved.
+enum ObFileTableFormat
+{
+  FILE_TABLE_FORMAT_CSV = 0,
+  FILE_TABLE_FORMAT_JSON = 1,
+  FILE_TABLE_FORMAT_PARQUET = 2,
+  FILE_TABLE_FORMAT_GLOB = 3,
+};
+
+struct ObFileColDef
+{
+  ObFileColDef()
+    : col_name_(), type_(0), nullable_(true), column_id_(0), data_type_() {}
+  int deep_copy(const ObFileColDef &other, ObIAllocator &alloc);
+  ObString col_name_;
+  int64_t type_;      // ObFileScanType
+  bool nullable_;
+  int64_t column_id_;
+  ObDataType data_type_;
+};
+
+struct ObFileTableDef
+{
+  ObFileTableDef()
+    : path_(), format_(0), has_header_(true), null_string_(),
+      delimiter_(','), quote_('"'), cols_(), file_size_(0), file_mtime_(0) {}
+  int deep_copy(const ObFileTableDef &other, ObIAllocator &alloc);
+  ObString path_;
+  int64_t format_;
+  bool has_header_;
+  ObString null_string_;
+  int64_t delimiter_;
+  int64_t quote_;
+  common::ObSEArray<ObFileColDef, 8, common::ModulePageAllocator, true> cols_;
+  int64_t file_size_;
+  int64_t file_mtime_;
+};
+
+struct ObValuesTableDef {  ObValuesTableDef() : start_param_idx_(-1), end_param_idx_(-1), column_cnt_(0), row_cnt_(0),
                        access_type_(ACCESS_EXPR), is_const_(false) {}
   enum TableAccessType {
     ACCESS_EXPR = 0,  // expr, one by one
@@ -153,6 +191,7 @@ struct TableItem
     ddl_schema_version_ = 0;
     ddl_table_id_ = common::OB_INVALID_ID;
     json_table_def_ = nullptr;
+    file_table_def_ = nullptr;
     table_type_ = MAX_TABLE_TYPE;
     values_table_def_ = NULL;
     sample_info_ = nullptr;
@@ -190,6 +229,7 @@ struct TableItem
     JSON_TABLE,
     VALUES_TABLE,
     LATERAL_TABLE,
+    FILE_TABLE,
   };
 
   /**
@@ -223,6 +263,7 @@ struct TableItem
   bool is_joined_table() const { return JOINED_TABLE == type_; }
   bool is_function_table() const { return FUNCTION_TABLE == type_; }
   bool is_json_table() const { return JSON_TABLE == type_; }  // json_table_def_->table_type_ == MulModeTableType::OB_ORA_JSON_TABLE_TYPE
+  bool is_file_table() const { return FILE_TABLE == type_; }
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
 
   bool is_lateral_table() const { return LATERAL_TABLE == type_; }
@@ -260,6 +301,7 @@ struct TableItem
 
   ObJsonTableDef* get_json_table_def() { return json_table_def_; }
   int deep_copy_json_table_def(const ObJsonTableDef& jt_def, ObIRawExprCopier &expr_copier, ObIAllocator* allocator);
+  int deep_copy_file_table_def(const ObFileTableDef &file_def, ObIAllocator* allocator);
   int deep_copy_values_table_def(const ObValuesTableDef& table_def,
                                  ObIRawExprCopier &expr_copier,
                                  ObIAllocator* allocator);
@@ -301,6 +343,8 @@ struct TableItem
   common::ObSEArray<ObExecParamRawExpr*, 4, common::ModulePageAllocator, true> exec_params_;
   // json table
   ObJsonTableDef *json_table_def_;
+  // file table
+  ObFileTableDef *file_table_def_;
   // values table
   ObValuesTableDef *values_table_def_;
   // sample scan infos

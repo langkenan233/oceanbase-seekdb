@@ -563,6 +563,7 @@ int ObSelectResolver::check_group_by()
     !select_stmt->get_query_ctx()->is_prepare_stmt()) {
     // During the parsing process, standard group checker will record the columns and exprs that need to be checked, after all statements have been parsed completely
     if (OB_FAIL(standard_group_checker_.check_only_full_group_by())) {
+    } else {
     }
   }
 
@@ -574,6 +575,7 @@ int ObSelectResolver::check_group_by()
                                                  having_has_self_column_,
                                                  has_group_by_clause(),
                                                  only_need_constraints))) {
+    } else {
     }
   }
 
@@ -583,6 +585,7 @@ int ObSelectResolver::check_group_by()
   // 2. Recursively find if it is in the groupby column, and replace the pointer of the column in groupby.
   if (OB_SUCC(ret)) {
     if (OB_FAIL(ObTransformUtils::replace_stmt_expr_with_groupby_exprs(select_stmt, NULL))) {
+    } else {
     }
   }
   return ret;
@@ -1593,6 +1596,7 @@ int ObSelectResolver::resolve_field_list(const ParseNode &node)
   } // end for
 
   return ret;
+
 }
 
 int ObSelectResolver::add_alias_from_dot_notation(ObRawExpr *sel_expr, SelectItem& select_item)
@@ -1653,6 +1657,9 @@ int ObSelectResolver::expand_target_list(
     }
   } else if (table_item.is_json_table()) {
     if (OB_FAIL(resolve_all_json_table_columns(table_item, &column_items))) {
+    }
+  } else if (table_item.is_file_table()) {
+    if (OB_FAIL(resolve_all_file_table_columns(table_item, &column_items))) {
     }
   } else if (table_item.is_values_table()) {
     if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(get_stmt()->get_column_size() == 0)) {
@@ -1853,6 +1860,33 @@ int ObSelectResolver::resolve_all_function_table_columns(
   int ret = OB_SUCCESS;
   CK (OB_NOT_NULL(column_items));
   OZ (resolve_function_table_column_item(table_item, *column_items));
+  return ret;
+}
+
+int ObSelectResolver::resolve_all_file_table_columns(
+  const TableItem &table_item, ObIArray<ColumnItem> *column_items)
+{
+  int ret = OB_SUCCESS;
+  ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(column_items) || OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid argument", K(ret), K(column_items));
+  } else if (OB_ISNULL(table_item.file_table_def_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "file table def is null", K(ret), K(table_item.table_id_));
+  } else {
+    const ObFileTableDef *ft_def = table_item.file_table_def_;
+    for (int64_t i = 0; OB_SUCC(ret) && i < ft_def->cols_.count(); ++i) {
+      const ColumnItem *col_item = stmt->get_column_item(table_item.table_id_,
+                                                         ft_def->cols_.at(i).column_id_);
+      if (OB_ISNULL(col_item)) {
+        ret = OB_ERR_UNEXPECTED;
+        SQL_RESV_LOG(WARN, "file table column item not found", K(ret),
+                     K(table_item.table_id_), K(ft_def->cols_.at(i).column_id_));
+      } else if (OB_FAIL(column_items->push_back(*col_item))) {
+      }
+    }
+  }
   return ret;
 }
 
@@ -3022,6 +3056,17 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
                                      ? ObCharset::get_default_collation(external_format.csv_format_.cs_type_)
                                      : ObCharset::get_system_collation();
       if (OB_FAIL(external_format.csv_format_.init_format(ObDataInFileStruct(), 0, file_cs_type))) {
+      } else {
+        // `FORMAT CSV` follows the CSV convention, so a comma separates fields
+        // unless the statement asks for a different terminator explicitly.
+        bool has_field_term = false;
+        for (int i = 0; !has_field_term && i < format_node->num_child_; ++i) {
+          has_field_term = (NULL != format_node->children_[i]
+                            && T_FIELD_TERMINATED_STR == format_node->children_[i]->type_);
+        }
+        if (!has_field_term) {
+          external_format.csv_format_.field_term_str_ = ObString::make_string(",");
+        }
       }
     }
     for (int i = 0; OB_SUCC(ret) && i < format_node->num_child_; ++i) {

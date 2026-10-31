@@ -293,12 +293,14 @@ END_P SET_VAR DELIMITER
         GLOBAL_ALIAS
 
         HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
+        HEADER NULLSTR
 
         IDENTIFIED IK_MODE ILOG IMMEDIATE IMPORT INCLUDING INCR INDEXES INFO
         INNODB INPLACE INSERT_METHOD INSTANT INSTANCE INVOKER IO IO_THREAD IPC ISOLATE ISOLATION ISSUER
         INVISIBLE MERGE ISNULL INTERSECT INCREMENTAL INNER_PARSE ILOGCACHE INPUT INDEXED INCONSISTENT INDIVIDUAL
 
         JOB JSON JSON_ARRAYAGG JSON_OBJECTAGG JSON_QUERY JSON_VALUE JSON_TABLE
+        READ_CSV READ_JSON READ_NDJSON READ_PARQUET FILE_GLOB
 
         KEYWORD KEY_BLOCK_SIZE KEY_VERSION KVCACHE
 
@@ -406,6 +408,9 @@ END_P SET_VAR DELIMITER
 %type <node> sort_list sort_key opt_asc_desc sort_list_for_group_by sort_key_for_group_by opt_asc_desc_for_group_by sort_list_opt_null sort_key_opt_null opt_asc_desc_null
 %type <node> opt_query_expression_option_list query_expression_option_list query_expression_option opt_distinct opt_distinct_or_all opt_separator projection
 %type <node> from_list table_references table_reference table_factor normal_relation_factor dot_relation_factor relation_factor
+%type <node> file_table_func_name file_table_arg_value file_table_arg file_table_arg_list file_table_expr
+%type <node> describe_select_stmt
+%type <node> copy_stmt copy_option_list copy_option_item_list copy_option_item copy_format_type
 %type <node> relation_factor_in_hint relation_factor_in_hint_list relation_factor_in_pq_hint opt_relation_factor_in_hint_list relation_factor_in_use_join_hint_list
 %type <node> relation_factor_in_leading_hint_list joined_table tbl_name table_subquery table_subquery_alias
 %type <node> relation_factor_with_star relation_with_star_list opt_with_star
@@ -582,6 +587,8 @@ stmt:
   | drop_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | drop_view_stmt          { $$ = $1; check_question_mark($$, result); }
   | explain_stmt            { $$ = $1; question_mark_issue($$, result); }
+  | describe_select_stmt    { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | create_outline_stmt     { $$ = $1; question_mark_issue($$, result); }
   | alter_outline_stmt      { $$ = $1; question_mark_issue($$, result); }
   | drop_outline_stmt       { $$ = $1; check_question_mark($$, result); }
@@ -688,6 +695,80 @@ pl_expr_stmt:
         malloc_non_terminal_node($$, result->malloc_pool_, T_DEFAULT, 1, $2);
       }
     }
+;
+
+describe_select_stmt:
+DESCRIBE select_stmt
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_DESCRIBE_SELECT_STMT, 1, $2);
+}
+;
+
+/* COPY (query) TO 'path' (format csv, header, nullstr 'NULL') */
+copy_stmt:
+COPY '(' select_stmt ')' TO STRING_VALUE copy_option_list
+{
+  ParseNode *format_list = NULL;
+  ParseNode *into_node = NULL;
+  merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, $7);
+  malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3, $6, format_list, NULL);
+  $$ = $3;
+  $$->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
+}
+;
+
+copy_option_list:
+'(' copy_option_item_list ')'
+{
+  $$ = $2;
+}
+;
+
+copy_option_item_list:
+copy_option_item
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 1, $1);
+}
+| copy_option_item_list ',' copy_option_item
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_option_item:
+FORMAT opt_equal_mark copy_format_type
+{
+  (void)($2);
+  $$ = $3;
+}
+| HEADER
+{
+  ParseNode *bool_node = NULL;
+  malloc_terminal_node(bool_node, result->malloc_pool_, T_BOOL);
+  bool_node->value_ = 1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_PARSE_HEADER, 1, bool_node);
+}
+| HEADER COMP_EQ BOOL_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_PARSE_HEADER, 1, $3);
+}
+| NULLSTR STRING_VALUE
+{
+  ParseNode *null_list = NULL;
+  malloc_list_node(null_list, result->malloc_pool_, T_EXPR_LIST, 2, 1, $2);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_NULL_IF_EXETERNAL, 1, null_list);
+}
+;
+
+copy_format_type:
+relation_name
+{
+  ParseNode *type_str = NULL;
+  malloc_terminal_node(type_str, result->malloc_pool_, T_VARCHAR);
+  type_str->str_value_ = $1->str_value_;
+  type_str->str_len_ = $1->str_len_;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, type_str);
+}
 ;
 
 expr_list:
@@ -10787,6 +10868,86 @@ table_factor
 }
 ;
 
+file_table_func_name:
+READ_CSV
+{
+  make_name_node($$, result->malloc_pool_, "read_csv");
+}
+| READ_JSON
+{
+  make_name_node($$, result->malloc_pool_, "read_json");
+}
+| READ_NDJSON
+{
+  make_name_node($$, result->malloc_pool_, "read_ndjson");
+}
+| READ_PARQUET
+{
+  make_name_node($$, result->malloc_pool_, "read_parquet");
+}
+| FILE_GLOB
+{
+  make_name_node($$, result->malloc_pool_, "glob");
+}
+;
+
+file_table_arg_value:
+STRING_VALUE
+{
+  $$ = $1;
+}
+| BOOL_VALUE
+{
+  $$ = $1;
+}
+| INTNUM
+{
+  $$ = $1;
+}
+| '-' INTNUM
+{
+  $2->value_ = -$2->value_;
+  $$ = $2;
+}
+| relation_name
+{
+  $$ = $1;
+}
+;
+
+file_table_arg:
+STRING_VALUE
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_ARG, 2, NULL, $1);
+}
+| relation_name COMP_EQ file_table_arg_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_ARG, 2, $1, $3);
+}
+;
+
+file_table_arg_list:
+file_table_arg
+{
+  $$ = $1;
+}
+| file_table_arg_list ',' file_table_arg
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_table_expr:
+file_table_func_name '(' file_table_arg_list ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, NULL);
+}
+| file_table_func_name '(' file_table_arg_list ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, $5);
+}
+;
+
 table_factor:
 tbl_name
 {
@@ -10832,6 +10993,10 @@ tbl_name
   $$->value_ = 1; //lateral
 }
 | json_table_expr
+{
+  $$ = $1;
+}
+| file_table_expr
 {
   $$ = $1;
 }
@@ -12257,7 +12422,13 @@ $$ = NULL;
  *
  *****************************************************************************/
 explain_stmt:
-explain_or_desc relation_factor opt_desc_column_option
+DESCRIBE relation_factor opt_desc_column_option
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_INT);
+  $$->value_ = 0;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
+}
+| explain_or_desc relation_factor opt_desc_column_option
 {
   (void)($1);
   malloc_terminal_node($$, result->malloc_pool_, T_INT);
@@ -12306,7 +12477,6 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
 | DESC  {$$ = NULL;}
 ;
 
@@ -17715,6 +17885,8 @@ ACCOUNT
 |       GROUPING
 |       GROUP_CONCAT
 |       HASH
+|       HEADER
+|       NULLSTR
 |       HEAP
 |       HELP
 |       HISTOGRAM
