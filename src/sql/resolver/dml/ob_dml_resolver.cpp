@@ -13314,3 +13314,154 @@ int ObDMLResolver::check_need_fill_embedded_vec_expr_param(const ObDMLStmt &stmt
 
 }  // namespace sql
 }  // namespace oceanbase
+
+namespace oceanbase
+{
+namespace sql
+{
+
+// Builds the physical name of one of the hidden companion columns that every AI
+// column owns.
+static int build_ai_hidden_column_name(const char *prefix,
+                                       const ObString &column_name,
+                                       char *buf,
+                                       const int64_t buf_len,
+                                       int64_t &len)
+{
+  int ret = OB_SUCCESS;
+  const int64_t prefix_len = static_cast<int64_t>(STRLEN(prefix));
+  len = 0;
+  if (prefix_len + column_name.length() > buf_len) {
+    ret = OB_BUF_NOT_ENOUGH;
+    SQL_RESV_LOG(WARN, "ai hidden column name is too long", K(ret), K(column_name));
+  } else {
+    MEMCPY(buf, prefix, prefix_len);
+    MEMCPY(buf + prefix_len, column_name.ptr(), column_name.length());
+    len = prefix_len + column_name.length();
+  }
+  return ret;
+}
+
+int build_ai_column_dml_sql(ObSQLSessionInfo &session,
+                            const ObTableSchema &table_schema,
+                            const ObString &db_name,
+                            const ObIArray<uint64_t> &ai_column_ids,
+                            const ObString &insert_pk_values,
+                            const ObString &request_id,
+                            const bool is_insert)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  session.get_ai_dml_post_sql().reuse();
+  if (request_id.empty()) {
+    ret = OB_INVALID_ARGUMENT;
+    SQL_RESV_LOG(WARN, "empty ai column request id", K(ret));
+  } else if (ai_column_ids.empty()) {
+    // nothing to queue
+  } else if (1 != table_schema.get_rowkey_column_num()) {
+    // A composite row key cannot be expressed as the single predicate the
+    // worker uses to locate the row again, so such rows are not queued.
+    SQL_RESV_LOG(DEBUG, "ai column, skip table with composite row key",
+                 K(table_schema.get_table_name_str()));
+  } else {
+    ObSEArray<uint64_t, 1> rowkey_ids;
+    const ObColumnSchemaV2 *pk_column = NULL;
+    if (OB_FAIL(table_schema.get_rowkey_column_ids(rowkey_ids)) || rowkey_ids.empty()) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "get row key column ids failed", K(ret));
+    } else if (OB_ISNULL(pk_column = table_schema.get_column_schema(rowkey_ids.at(0)))) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "primary key column is missing", K(ret));
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_ids.count(); ++i) {
+      const ObColumnSchemaV2 *ai_column = table_schema.get_column_schema(ai_column_ids.at(i));
+      char request_column[OB_MAX_COLUMN_NAME_LENGTH];
+      int64_t request_column_len = 0;
+      if (OB_ISNULL(ai_column)) {
+        ret = OB_ERR_UNEXPECTED;
+        SQL_RESV_LOG(WARN, "ai column schema is missing", K(ret), K(ai_column_ids.at(i)));
+      } else if (OB_FAIL(build_ai_hidden_column_name("__ai_request_",
+                                                     ai_column->get_column_name_str(),
+                                                     request_column,
+                                                     OB_MAX_COLUMN_NAME_LENGTH,
+                                                     request_column_len))) {
+      } else if (is_insert && insert_pk_values.empty()) {
+        // The inserted values are still placeholders at resolve time, so the new
+        // rows are recognised by the empty AI column instead: a row that already
+        // holds a result is finished and must not be queued again.
+        const ObString &table_name = table_schema.get_table_name_str();
+        if (OB_FAIL(sql.append_fmt("REPLACE INTO oceanbase.__all_ai_column_task"
+                                   "(table_id, column_id, task_id, request_id,"
+                                   " def_version, state, retry_count, rowkey_predicate,"
+                                   " eligible_ts) SELECT %lu, %lu, CONCAT('`%.*s` = ', `%.*s`),"
+                                   " '%.*s', 0, 0, 0, CONCAT('`%.*s` = ', `%.*s`), NOW(6)"
+                                   " FROM `%.*s`.`%.*s` WHERE (`%.*s` IS NULL);",
+                                   table_schema.get_table_id(),
+                                   ai_column->get_column_id(),
+                                   pk_column->get_column_name_str().length(),
+                                   pk_column->get_column_name_str().ptr(),
+                                   pk_column->get_column_name_str().length(),
+                                   pk_column->get_column_name_str().ptr(),
+                                   request_id.length(), request_id.ptr(),
+                                   pk_column->get_column_name_str().length(),
+                                   pk_column->get_column_name_str().ptr(),
+                                   pk_column->get_column_name_str().length(),
+                                   pk_column->get_column_name_str().ptr(),
+                                   db_name.length(), db_name.ptr(),
+                                   table_name.length(), table_name.ptr(),
+                                   ai_column->get_column_name_str().length(),
+                                   ai_column->get_column_name_str().ptr()))) {
+          SQL_RESV_LOG(WARN, "append ai column insert task sql failed", K(ret));
+        }
+      } else {
+        const ObString &table_name = table_schema.get_table_name_str();
+        if (OB_FAIL(sql.append_fmt("REPLACE INTO oceanbase.__all_ai_column_task"
+                                   "(table_id, column_id, task_id, request_id,"
+                                   " def_version, state, retry_count, rowkey_predicate,"
+                                   " eligible_ts) SELECT %lu, %lu, CONCAT('`%.*s` = ', `%.*s`),"
+                                   " '%.*s', 0, 0, 0, CONCAT('`%.*s` = ', `%.*s`), NOW(6)"
+                                   " FROM `%.*s`.`%.*s` WHERE ",
+                                   table_schema.get_table_id(),
+                                   ai_column->get_column_id(),
+                                   pk_column->get_column_name_str().length(),
+                                   pk_column->get_column_name_str().ptr(),
+                                   pk_column->get_column_name_str().length(),
+                                   pk_column->get_column_name_str().ptr(),
+                                   request_id.length(), request_id.ptr(),
+                                   pk_column->get_column_name_str().length(),
+                                   pk_column->get_column_name_str().ptr(),
+                                   pk_column->get_column_name_str().length(),
+                                   pk_column->get_column_name_str().ptr(),
+                                   db_name.length(), db_name.ptr(),
+                                   table_name.length(), table_name.ptr()))) {
+          SQL_RESV_LOG(WARN, "append ai column task sql failed", K(ret));
+        } else if (is_insert) {
+          if (OB_FAIL(sql.append_fmt("(`%.*s` IS NULL) AND (`%.*s` IN (%.*s))",
+                                     ai_column->get_column_name_str().length(),
+                                     ai_column->get_column_name_str().ptr(),
+                                     pk_column->get_column_name_str().length(),
+                                     pk_column->get_column_name_str().ptr(),
+                                     insert_pk_values.length(), insert_pk_values.ptr()))) {
+            SQL_RESV_LOG(WARN, "append ai column insert predicate failed", K(ret));
+          }
+        } else if (OB_FAIL(sql.append_fmt("(`%.*s` = '%.*s')",
+                                          static_cast<int>(request_column_len), request_column,
+                                          request_id.length(), request_id.ptr()))) {
+          SQL_RESV_LOG(WARN, "append ai column request predicate failed", K(ret));
+        }
+        if (OB_SUCC(ret) && OB_FAIL(sql.append(";"))) {
+          SQL_RESV_LOG(WARN, "append ai column statement separator failed", K(ret));
+        }
+      }
+    }
+    if (OB_SUCC(ret) && sql.length() > 0) {
+      if (OB_FAIL(session.get_ai_dml_post_sql().assign(sql))) {
+        SQL_RESV_LOG(WARN, "store ai column dml sql failed", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+}  // namespace sql
+}  // namespace oceanbase

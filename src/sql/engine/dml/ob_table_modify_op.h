@@ -231,6 +231,12 @@ public:
   int end_nested_session();
   int execute_write(const char *sql);
   int execute_read(const char *sql, common::ObMySQLProxy::MySQLResult &res);
+  // Runs the AI column statements the resolver prepared for this statement.
+  // The pre form stamps the touched rows before the write, the post form turns
+  // the stamped rows into worker tasks. Both share the statement transaction.
+  int exec_ai_column_pre_sql();
+  int exec_ai_column_post_sql();
+  int run_ai_sql_script(const char *sql);
   int check_stack();
   bool is_nested_session() { return ObSQLUtils::is_nested_sql(&ctx_); }
   bool is_fk_nested_session() { return ObSQLUtils::is_fk_nested_sql(&ctx_); }
@@ -299,6 +305,8 @@ protected:
   virtual void record_err_for_load_data(int err_ret, int row_num) { UNUSED(err_ret); UNUSED(row_num); }
 public:
   common::ObMySQLProxy *sql_proxy_;
+  common::ObSqlString ai_dml_post_sql_;
+  bool ai_dml_has_post_;
   common::sqlclient::ObISQLConnectionGuard inner_conn_guard_;
   ObIInnerSQLConnection *inner_conn_;
   ObIInnerSQLConnection::SavedValue saved_conn_;

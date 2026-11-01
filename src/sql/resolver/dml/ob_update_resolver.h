@@ -58,6 +58,13 @@ private:
   int check_safe_update_mode(ObUpdateStmt *update_stmt);
   int resolve_update_constraints();
   int generate_batched_stmt_info();
+  // Drops and re-queues the AI columns whose inputs this statement changes.
+  int mark_ai_columns_for_update(common::ObIArray<ObTableAssignment> &table_assigns);
+  int add_ai_column_assignment(ObTableAssignment &table_assign,
+                               const TableItem &table_item,
+                               const share::schema::ObColumnSchemaV2 &column,
+                               const int64_t kind,
+                               const common::ObString &request_id);
 };
 
 } // namespace sql

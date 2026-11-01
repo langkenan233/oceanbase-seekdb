@@ -613,6 +613,8 @@ ObTableModifyOp::ObTableModifyOp(ObExecContext &ctx,
                                  ObOpInput *input)
   : ObOperator(ctx, spec, input),
     sql_proxy_(NULL),
+    ai_dml_post_sql_(),
+    ai_dml_has_post_(false),
     inner_conn_guard_(),
     inner_conn_(NULL),
     saved_conn_(),
@@ -638,7 +640,9 @@ int ObTableModifyOp::inner_open()
   int ret = OB_SUCCESS;
   ObSQLSessionInfo *my_session = GET_MY_SESSION(ctx_);
   if (OB_FAIL(init_foreign_key_operation())) {
-  } else if (MY_SPEC.plan_->has_nested_sql() && OB_FAIL(open_inner_conn())) {
+  } else if ((MY_SPEC.plan_->has_nested_sql()
+              || (NULL != my_session && my_session->has_ai_dml_sql()))
+             && OB_FAIL(open_inner_conn())) {
   } else if (OB_FAIL(calc_single_table_loc())) {
   } else if (OB_FAIL(check_need_exec_single_row())) {
   } else {
@@ -996,6 +1000,133 @@ int ObTableModifyOp::execute_write(const char *sql)
   } else if (OB_ISNULL(sql)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(inner_conn_->execute_write(sql, affected_rows))) {
+  }
+  return ret;
+}
+
+// The resolver emits one statement per AI column, separated by ';'. They are
+// run one by one because a nested session executes a single statement at a time.
+static int exec_ai_sql_script(ObTableModifyOp *op, const char *sql)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString piece;
+  if (OB_ISNULL(op) || OB_ISNULL(sql)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    const char *start = sql;
+    const char *cur = sql;
+    while (OB_SUCC(ret)) {
+      if (';' != *cur && '\0' != *cur) {
+        ++cur;
+        continue;
+      }
+      if (cur > start) {
+        piece.reuse();
+        if (OB_FAIL(piece.append(start, static_cast<int32_t>(cur - start)))) {
+          LOG_WARN("assemble ai column statement failed", K(ret));
+        } else if (OB_FAIL(op->execute_write(piece.ptr()))) {
+          LOG_WARN("run ai column statement failed", K(ret), K(piece));
+        }
+      }
+      if ('\0' == *cur) {
+        break;
+      }
+      start = cur + 1;
+      ++cur;
+    }
+  }
+  return ret;
+}
+
+// A nested session is required around every inner statement, exactly as the
+// foreign key path does it: without the saved session the inner statement would
+// end the transaction the outer one still owns.
+int ObTableModifyOp::run_ai_sql_script(const char *sql)
+{
+  int ret = OB_SUCCESS;
+  ObDASCtx &das_ctx = ctx_.get_das_ctx();
+  // The inner statement must see itself as nested, otherwise it would end the
+  // statement bookkeeping the outer one still owns.
+  const bool saved_nested_flag = das_ctx.ai_column_nested_;
+  das_ctx.ai_column_nested_ = true;
+  if (OB_FAIL(begin_nested_session(true))) {
+    LOG_WARN("begin nested session for ai column failed", K(ret));
+  } else {
+    int end_ret = OB_SUCCESS;
+    if (OB_FAIL(exec_ai_sql_script(this, sql))) {
+      LOG_WARN("run ai column statement failed", K(ret));
+    }
+    end_ret = end_nested_session();
+    if (OB_SUCCESS != end_ret) {
+      LOG_WARN("end nested session for ai column failed", K(end_ret));
+      if (OB_SUCC(ret)) {
+        ret = end_ret;
+      }
+    }
+  }
+  das_ctx.ai_column_nested_ = saved_nested_flag;
+  return ret;
+}
+
+int ObTableModifyOp::exec_ai_column_pre_sql()
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  ObSqlString pre;
+  if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (!session->has_ai_dml_sql()) {
+    // this statement does not touch an AI column
+  } else if (OB_FAIL(pre.assign(session->get_ai_dml_pre_sql()))) {
+    LOG_WARN("copy ai column pre statement failed", K(ret));
+  } else if (OB_FAIL(ai_dml_post_sql_.assign(session->get_ai_dml_post_sql()))) {
+    LOG_WARN("copy ai column post statement failed", K(ret));
+  } else {
+    // The nested statement prepares against this session and would overwrite
+    // the slot, so both halves are copied out before anything runs.
+    ai_dml_has_post_ = ai_dml_post_sql_.length() > 0;
+    session->reset_ai_dml_sql();
+    if (OB_SUCC(ret) && pre.length() > 0) {
+      if (OB_ISNULL(inner_conn_) && OB_FAIL(open_inner_conn())) {
+      } else if (OB_FAIL(run_ai_sql_script(pre.ptr()))) {
+        LOG_WARN("run ai column pre statement failed", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObTableModifyOp::exec_ai_column_post_sql()
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("session is null when running ai column statement", K(ret));
+  }
+  if (OB_FAIL(ret)) {
+  } else if (!ai_dml_has_post_ && session->has_ai_dml_sql()) {
+    // Statements without a pre phase, such as insert and delete, reach this
+    // point with the text still in the session slot.
+    if (OB_FAIL(ai_dml_post_sql_.assign(session->get_ai_dml_post_sql()))) {
+      LOG_WARN("copy ai column post statement failed", K(ret));
+    } else {
+      ai_dml_has_post_ = ai_dml_post_sql_.length() > 0;
+      session->reset_ai_dml_sql();
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (!ai_dml_has_post_) {
+    // nothing was queued for this statement
+  } else if (OB_SUCCESS != ctx_.get_errcode()) {
+    // the write failed, the transaction will roll back the stamp as well
+  } else if (OB_ISNULL(inner_conn_) && OB_FAIL(open_inner_conn())) {
+    LOG_WARN("open inner connection for ai column failed", K(ret));
+  } else {
+    ai_dml_has_post_ = false;
+    if (OB_FAIL(run_ai_sql_script(ai_dml_post_sql_.ptr()))) {
+      LOG_WARN("run ai column post statement failed", K(ret));
+    }
   }
   return ret;
 }

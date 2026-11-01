@@ -2492,19 +2492,19 @@ all_ai_column_task_def = dict(
     gm_columns = ['gmt_create', 'gmt_modified'],
     rowkey_columns = [
         ('table_id', 'int'),
-        ('task_id', 'int')
+        ('column_id', 'int'),
+        ('task_id', 'varchar:512')
     ],
 
     is_cluster_private = False,
     meta_record_in_sys = False,
     normal_columns = [
         ('request_id', 'varchar:64', 'true'),
-        ('column_id', 'int', 'false', -1),
         ('def_version', 'int', 'false', 0),
         ('state', 'int', 'false', 0),
         ('retry_count', 'int', 'false', 0),
         ('rowkey_predicate', 'varchar:2048', 'true'),
-        ('eligible_ts', 'int', 'false', 0),
+        ('eligible_ts', 'timestamp', 'true'),
         ('worker_id', 'varchar:128', 'true')
     ]
 )

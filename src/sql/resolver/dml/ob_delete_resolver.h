@@ -43,6 +43,8 @@ public:
   ObDeleteStmt *get_delete_stmt() { return static_cast<ObDeleteStmt*>(stmt_); }
 private:
   int resolve_table_list(const ParseNode &table_node, bool &is_multi_table_delete);
+  // Drops the pending work of the rows this statement removes.
+  int drop_ai_column_tasks();
   int generate_delete_table_info(const TableItem &table_item);
   int check_multi_delete_table_conflict();
   // MySQL multi-table DELETE target table search rule.

@@ -111,6 +111,7 @@ int ObDeleteResolver::resolve(const ParseNode &parse_tree)
       } else if (OB_FAIL(delete_stmt->check_dml_need_filter_null())) {
       } else if (OB_FAIL(delete_stmt->check_dml_source_from_join())) {
       } else if (OB_FAIL(check_safe_update_mode(delete_stmt, is_multi_table_delete))) {
+      } else if (OB_FAIL(drop_ai_column_tasks())) {
       } else { /*do nothing */ }
     }
   }
@@ -425,3 +426,67 @@ int ObDeleteResolver::check_view_deletable()
 
 }  // namespace sql
 }
+
+namespace oceanbase
+{
+namespace sql
+{
+
+// The rows are gone by the time the statement finishes, so their identity is
+// not reproduced here: every pending task of the table's AI columns is dropped
+// instead, which is what the worker would have discovered anyway.
+int ObDeleteResolver::drop_ai_column_tasks()
+{
+  int ret = OB_SUCCESS;
+  ObDeleteStmt *stmt = get_delete_stmt();
+  ObSqlString sql;
+  ObSEArray<uint64_t, 4> ai_column_ids;
+  if (OB_ISNULL(stmt) || OB_ISNULL(session_info_) || OB_ISNULL(schema_checker_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid delete resolver state", K(ret));
+  } else if (1 != stmt->get_table_size()) {
+    // A multi table delete does not map to one target table.
+  } else {
+    session_info_->reset_ai_dml_sql();
+    const TableItem *table_item = stmt->get_table_item(0);
+    const ObTableSchema *table_schema = NULL;
+    if (OB_ISNULL(table_item)
+        || OB_FAIL(schema_checker_->get_table_schema(table_item->ref_id_, table_schema))
+        || OB_ISNULL(table_schema)) {
+      ret = COVER_SUCC(OB_ERR_UNEXPECTED);
+      LOG_WARN("table schema is missing", K(ret));
+    }
+    for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
+         OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+      const ObColumnSchemaV2 *column = *iter;
+      if (NULL != column && column->is_ai_column()
+          && OB_FAIL(ai_column_ids.push_back(column->get_column_id()))) {
+        LOG_WARN("collect ai column failed", K(ret));
+      }
+    }
+    if (OB_SUCC(ret) && !ai_column_ids.empty()) {
+      if (OB_FAIL(sql.append_fmt("DELETE FROM oceanbase.__all_ai_column_task"
+                                 " WHERE table_id = %lu AND column_id IN (",
+                                 table_schema->get_table_id()))) {
+        LOG_WARN("build task cleanup prefix failed", K(ret));
+      }
+      for (int64_t i = 0; OB_SUCC(ret) && i < ai_column_ids.count(); ++i) {
+        if (OB_FAIL(sql.append_fmt("%s%lu", 0 == i ? "" : ", ", ai_column_ids.at(i)))) {
+          LOG_WARN("build task cleanup list failed", K(ret));
+        }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(sql.append(");"))) {
+        LOG_WARN("build task cleanup suffix failed", K(ret));
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(session_info_->get_ai_dml_post_sql().assign(sql))) {
+          LOG_WARN("store ai column cleanup sql failed", K(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+}  // namespace sql
+}  // namespace oceanbase

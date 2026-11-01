@@ -906,6 +906,22 @@ protected:
   DISALLOW_COPY_AND_ASSIGN(ObDMLResolver);
 };
 
+class ObSQLSessionInfo;
+
+// Queues the rows touched by one DML statement for the AI column worker. The
+// rows are located by the request id that the statement stamped on them, so no
+// predicate has to be reproduced. The statements run inside the DML
+// transaction: a rollback drops the tasks together with the data change.
+// insert_pk_values holds comma separated primary key literals and is only used
+// by INSERT, where the rows carry no stamp.
+int build_ai_column_dml_sql(ObSQLSessionInfo &session,
+                            const share::schema::ObTableSchema &table_schema,
+                            const ObString &db_name,
+                            const common::ObIArray<uint64_t> &ai_column_ids,
+                            const ObString &insert_pk_values,
+                            const ObString &request_id,
+                            const bool is_insert);
+
 }  // namespace sql
 }  // namespace oceanbase
 #endif /* OCEANBASE_SQL_RESOLVER_DML_OB_DML_RESOLVER_H_ */

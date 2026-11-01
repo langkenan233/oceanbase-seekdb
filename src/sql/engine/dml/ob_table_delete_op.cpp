@@ -325,6 +325,7 @@ int ObTableDeleteOp::inner_close()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(close_table_for_each())) {
+  } else if (OB_FAIL(exec_ai_column_post_sql())) {
   }
   int close_ret = ObTableModifyOp::inner_close();
   return (OB_SUCCESS == ret) ? close_ret : ret;

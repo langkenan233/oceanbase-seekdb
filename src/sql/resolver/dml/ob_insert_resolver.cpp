@@ -101,6 +101,12 @@ int ObInsertResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(mark_ai_columns_for_insert())) {
+      LOG_WARN("mark ai columns for insert failed", K(ret));
+    }
+  }
+
   return ret;
 }
 
@@ -1170,6 +1176,73 @@ int ObInsertResolver::check_view_insertable()
  *
  */
 
+
+}  // namespace sql
+}  // namespace oceanbase
+
+namespace oceanbase
+{
+namespace sql
+{
+
+int ObInsertResolver::mark_ai_columns_for_insert()
+{
+  int ret = OB_SUCCESS;
+  ObInsertStmt *stmt = get_insert_stmt();
+  ObSEArray<uint64_t, 4> ai_column_ids;
+  char request_buf[64];
+  int64_t request_pos = 0;
+  if (OB_ISNULL(stmt) || OB_ISNULL(session_info_) || OB_ISNULL(schema_checker_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("invalid insert resolver state", K(ret));
+  } else if (stmt->value_from_select() || 1 != stmt->get_table_size()
+             || stmt->is_replace()) {
+    // Rows produced by a query are left to the background worker, the statement
+    // cannot name them here.
+  } else {
+    const TableItem *table_item = stmt->get_table_item(0);
+    const ObTableSchema *table_schema = NULL;
+    session_info_->reset_ai_dml_sql();
+    if (OB_ISNULL(table_item)
+        || OB_FAIL(schema_checker_->get_table_schema(table_item->ref_id_, table_schema))
+        || OB_ISNULL(table_schema)) {
+      ret = COVER_SUCC(OB_ERR_UNEXPECTED);
+      LOG_WARN("table schema is missing", K(ret));
+    } else if (OB_FAIL(databuff_printf(request_buf,
+                                       sizeof(request_buf),
+                                       request_pos,
+                                       "ai%ld",
+                                       ObTimeUtility::current_time()))) {
+      LOG_WARN("build ai column request id failed", K(ret));
+    }
+    for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
+         OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+      const ObColumnSchemaV2 *column = *iter;
+      if (NULL != column && column->is_ai_column()
+          && OB_FAIL(ai_column_ids.push_back(column->get_column_id()))) {
+        LOG_WARN("collect ai column failed", K(ret));
+      }
+    }
+    if (OB_SUCC(ret) && !ai_column_ids.empty()) {
+      const ObString request_id(static_cast<int32_t>(request_pos), request_buf);
+      const ObString db_name = table_item->database_name_.empty()
+                                   ? session_info_->get_database_name()
+                                   : table_item->database_name_;
+      // The inserted values are placeholders here, so the new rows are queued by
+      // their empty AI column instead of by their key.
+      if (OB_FAIL(build_ai_column_dml_sql(*session_info_,
+                                          *table_schema,
+                                          db_name,
+                                          ai_column_ids,
+                                          ObString(),
+                                          request_id,
+                                          true))) {
+        LOG_WARN("build ai column dml sql failed", K(ret));
+      }
+    }
+  }
+  return ret;
+}
 
 }  // namespace sql
 }  // namespace oceanbase

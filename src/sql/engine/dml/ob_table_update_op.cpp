@@ -142,6 +142,7 @@ int ObTableUpdateOp::inner_open()
   } else if (OB_UNLIKELY(iter_end_)) {
     //do nothing
   } else if (OB_FAIL(inner_open_with_das())) {
+  } else if (OB_FAIL(exec_ai_column_pre_sql())) {
   }
   NG_TRACE(update_end);
   return ret;
@@ -151,6 +152,7 @@ int ObTableUpdateOp::inner_close()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(close_table_for_each())) {
+  } else if (OB_FAIL(exec_ai_column_post_sql())) {
   }
   int  close_ret = ObTableModifyOp::inner_close();
   return (OB_SUCCESS == ret) ? close_ret : ret;

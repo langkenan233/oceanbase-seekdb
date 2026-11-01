@@ -112,6 +112,12 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(mark_ai_columns_for_update(tables_assign))) {
+      SQL_RESV_LOG(WARN, "mark ai columns for update failed", K(ret));
+    }
+  }
+
   //add column for table scan, keep rowkey column in the head
   if (OB_SUCC(ret)) {
     for (int64_t i = 0; OB_SUCC(ret) && i < tables_assign.count(); i++) {
@@ -532,6 +538,264 @@ int ObUpdateResolver::resolve_update_constraints()
                                                      table_info->view_check_exprs_.at(j)))) {
           }
         }
+      }
+    }
+  }
+  return ret;
+}
+
+}  // namespace sql
+}  // namespace oceanbase
+
+namespace oceanbase
+{
+namespace sql
+{
+
+// Characters that may appear inside an identifier. A match is only counted when
+// the neighbours are not part of a name, so "content" does not match
+// "content_hash".
+static bool ai_ident_char(const char c)
+{
+  return isalnum(static_cast<unsigned char>(c)) || '_' == c || '$' == c || '.' == c;
+}
+
+// The stored definition is five fields separated by a control character; the
+// expression lives in the last one.
+static ObString ai_column_expression_text(const ObString &def)
+{
+  const char sep = '\x01';
+  ObString expr;
+  int32_t start = 0;
+  int32_t seen = 0;
+  for (int32_t i = 0; i < def.length() && seen < 4; ++i) {
+    if (sep == def.ptr()[i]) {
+      ++seen;
+      start = i + 1;
+    }
+  }
+  if (4 == seen && start < def.length()) {
+    expr.assign_ptr(def.ptr() + start, def.length() - start);
+  }
+  return expr;
+}
+
+static bool ai_column_text_refers_to(const ObString &expr, const ObString &name)
+{
+  bool found = false;
+  const int32_t name_len = name.length();
+  if (name_len > 0 && expr.length() >= name_len) {
+    const char *text = expr.ptr();
+    for (int32_t i = 0; !found && i + name_len <= expr.length(); ++i) {
+      if (0 != strncasecmp(text + i, name.ptr(), name_len)) {
+        continue;
+      }
+      const bool left_ok = (0 == i) || !ai_ident_char(text[i - 1]);
+      const bool right_ok = (i + name_len == expr.length())
+                            || !ai_ident_char(text[i + name_len]);
+      found = left_ok && right_ok;
+    }
+  }
+  return found;
+}
+
+static int form_ai_hidden_column_name(const char *prefix,
+                                      const ObString &column_name,
+                                      char *buf)
+{
+  int ret = OB_SUCCESS;
+  const int64_t prefix_len = static_cast<int64_t>(STRLEN(prefix));
+  if (prefix_len + column_name.length() > OB_MAX_COLUMN_NAME_LENGTH) {
+    ret = OB_BUF_NOT_ENOUGH;
+  } else {
+    MEMCPY(buf, prefix, prefix_len);
+    MEMCPY(buf + prefix_len, column_name.ptr(), column_name.length());
+    buf[prefix_len + column_name.length()] = '\0';
+  }
+  return ret;
+}
+
+// kind: 0 writes NULL, 1 writes the pending marker, 2 writes the request id.
+int ObUpdateResolver::add_ai_column_assignment(ObTableAssignment &table_assign,
+                                               const TableItem &table_item,
+                                               const ObColumnSchemaV2 &column,
+                                               const int64_t kind,
+                                               const ObString &request_id)
+{
+  int ret = OB_SUCCESS;
+  ObAssignment assignment;
+  ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
+  ColumnItem *col_item = NULL;
+  ObConstRawExpr *const_expr = NULL;
+  if (OB_ISNULL(params_.expr_factory_) || OB_ISNULL(get_update_stmt())) {
+    ret = OB_NOT_INIT;
+    SQL_RESV_LOG(WARN, "update resolver is not ready", K(ret));
+  } else if (OB_FAIL(add_column_to_stmt(table_item, column, col_exprs))) {
+    SQL_RESV_LOG(WARN, "add ai column to stmt failed", K(ret),
+                 K(column.get_column_name_str()));
+  } else if (col_exprs.empty()) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "no column expr for ai column", K(ret));
+  } else if (OB_ISNULL(col_item = get_update_stmt()->get_column_item_by_id(
+                           table_item.table_id_, col_exprs.at(0)->get_column_id()))) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "column item is missing", K(ret), K(column.get_column_name_str()));
+  } else if (FALSE_IT(assignment.column_expr_ = col_item->expr_)) {
+  } else if (FALSE_IT(assignment.is_implicit_ = true)) {
+  } else if (0 == kind) {
+    if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, assignment.expr_))) {
+      SQL_RESV_LOG(WARN, "build null expr failed", K(ret));
+    }
+  } else if (1 == kind) {
+    if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*params_.expr_factory_,
+                                                     ObIntType,
+                                                     1,
+                                                     const_expr))) {
+      SQL_RESV_LOG(WARN, "build pending marker failed", K(ret));
+    } else {
+      assignment.expr_ = const_expr;
+    }
+  } else {
+    if (OB_FAIL(ObRawExprUtils::build_const_string_expr(*params_.expr_factory_,
+                                                        ObVarcharType,
+                                                        request_id,
+                                                        CS_TYPE_UTF8MB4_BIN,
+                                                        const_expr))) {
+      SQL_RESV_LOG(WARN, "build request id expr failed", K(ret));
+    } else {
+      assignment.expr_ = const_expr;
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(table_assign.assignments_.push_back(assignment))) {
+    SQL_RESV_LOG(WARN, "add ai column assignment failed", K(ret));
+  }
+  return ret;
+}
+
+int ObUpdateResolver::mark_ai_columns_for_update(ObIArray<ObTableAssignment> &table_assigns)
+{
+  int ret = OB_SUCCESS;
+  ObUpdateStmt *stmt = get_update_stmt();
+  ObSEArray<uint64_t, 4> marked_ids;
+  char request_buf[64];
+  int64_t request_pos = 0;
+  if (OB_ISNULL(stmt) || OB_ISNULL(session_info_) || OB_ISNULL(params_.expr_factory_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid update resolver state", K(ret));
+  } else if (1 != stmt->get_table_size() || 1 != table_assigns.count()) {
+    // A multi table update does not map to one row per table, so its AI columns
+    // are left alone.
+  } else {
+    session_info_->reset_ai_dml_sql();
+    const TableItem *table_item = stmt->get_table_item(0);
+    const ObTableSchema *table_schema = NULL;
+    ObSchemaGetterGuard *schema_guard = NULL;
+    if (OB_ISNULL(table_item) || OB_ISNULL(schema_checker_)
+        || OB_ISNULL(schema_guard = schema_checker_->get_schema_guard())) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "invalid update resolver state", K(ret));
+    } else if (OB_FAIL(schema_checker_->get_table_schema(table_item->ref_id_, table_schema))
+               || OB_ISNULL(table_schema)) {
+      ret = COVER_SUCC(OB_ERR_UNEXPECTED);
+      SQL_RESV_LOG(WARN, "table schema is missing", K(ret));
+    } else if (OB_FAIL(databuff_printf(request_buf,
+                                       sizeof(request_buf),
+                                       request_pos,
+                                       "ai%ld",
+                                       ObTimeUtility::current_time()))) {
+      SQL_RESV_LOG(WARN, "build ai column request id failed", K(ret));
+    }
+    ObSEArray<uint64_t, 1> rowkey_ids;
+    uint64_t pk_id = OB_INVALID_ID;
+    if (OB_SUCC(ret) && 1 == table_schema->get_rowkey_column_num()) {
+      if (OB_FAIL(table_schema->get_rowkey_column_ids(rowkey_ids)) || rowkey_ids.empty()) {
+        SQL_RESV_LOG(WARN, "get row key column ids failed", K(ret));
+      } else {
+        pk_id = rowkey_ids.at(0);
+      }
+    }
+    ObTableAssignment &table_assign = table_assigns.at(0);
+    for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
+         OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+      const ObColumnSchemaV2 *ai_column = *iter;
+      ObString ai_def;
+      if (OB_ISNULL(ai_column) || !ai_column->is_ai_column()
+          || !ai_column->get_ai_column_def(ai_def)) {
+        continue;
+      }
+      const ObString expr_text = ai_column_expression_text(ai_def);
+      bool touched = false;
+      for (int64_t i = 0; OB_SUCC(ret) && !touched && i < table_assign.assignments_.count(); ++i) {
+        const ObAssignment &assign = table_assign.assignments_.at(i);
+        if (OB_ISNULL(assign.column_expr_)) {
+          continue;
+        }
+        const uint64_t changed_id = assign.column_expr_->get_column_id();
+        if (changed_id == pk_id) {
+          touched = true;
+        } else {
+          const ObColumnSchemaV2 *changed_column = table_schema->get_column_schema(changed_id);
+          touched = NULL != changed_column
+                    && ai_column_text_refers_to(expr_text, changed_column->get_column_name_str());
+        }
+      }
+      if (OB_SUCC(ret) && touched && OB_FAIL(marked_ids.push_back(ai_column->get_column_id()))) {
+        SQL_RESV_LOG(WARN, "collect ai column failed", K(ret));
+      }
+    }
+    const ObString request_id(static_cast<int32_t>(request_pos), request_buf);
+    // The stamp travels with the same UPDATE, so it follows a row whose key is
+    // rewritten and the worker can still locate that row afterwards.
+    for (int64_t i = 0; OB_SUCC(ret) && i < marked_ids.count(); ++i) {
+      const ObColumnSchemaV2 *ai_column = table_schema->get_column_schema(marked_ids.at(i));
+      char state_name[OB_MAX_COLUMN_NAME_LENGTH];
+      char request_name[OB_MAX_COLUMN_NAME_LENGTH];
+      const ObColumnSchemaV2 *state_column = NULL;
+      const ObColumnSchemaV2 *request_column = NULL;
+      if (OB_ISNULL(ai_column)) {
+        ret = OB_ERR_UNEXPECTED;
+        SQL_RESV_LOG(WARN, "ai column is missing", K(ret));
+      } else if (OB_FAIL(form_ai_hidden_column_name("__ai_state_",
+                                                    ai_column->get_column_name_str(),
+                                                    state_name))) {
+      } else if (OB_FAIL(form_ai_hidden_column_name("__ai_request_",
+                                                    ai_column->get_column_name_str(),
+                                                    request_name))) {
+      } else if (OB_ISNULL(state_column = table_schema->get_column_schema(ObString(state_name)))
+                 || OB_ISNULL(request_column =
+                                  table_schema->get_column_schema(ObString(request_name)))) {
+        ret = OB_ERR_UNEXPECTED;
+        SQL_RESV_LOG(WARN, "ai hidden column is missing", K(ret),
+                     K(ai_column->get_column_name_str()));
+      } else if (OB_FAIL(add_ai_column_assignment(table_assign,
+                                                  *table_item,
+                                                  *ai_column,
+                                                  0,
+                                                  request_id))) {
+      } else if (OB_FAIL(add_ai_column_assignment(table_assign,
+                                                  *table_item,
+                                                  *state_column,
+                                                  1,
+                                                  request_id))) {
+      } else if (OB_FAIL(add_ai_column_assignment(table_assign,
+                                                  *table_item,
+                                                  *request_column,
+                                                  2,
+                                                  request_id))) {
+      }
+    }
+    if (OB_SUCC(ret) && !marked_ids.empty()) {
+      const ObString db_name = table_item->database_name_.empty()
+                                   ? session_info_->get_database_name()
+                                   : table_item->database_name_;
+      if (OB_FAIL(build_ai_column_dml_sql(*session_info_,
+                                          *table_schema,
+                                          db_name,
+                                          marked_ids,
+                                          ObString(),
+                                          request_id,
+                                          false))) {
+        SQL_RESV_LOG(WARN, "build ai column dml sql failed", K(ret));
       }
     }
   }

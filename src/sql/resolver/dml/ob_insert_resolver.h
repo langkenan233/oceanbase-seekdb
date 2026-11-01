@@ -98,6 +98,8 @@ private:
   virtual int resolve_insert_update_assignment(const ParseNode *node, ObInsertTableInfo& table_info) override;
   int replace_column_to_default(ObRawExpr *&origin);
   int resolve_insert_constraint();
+  // Queues the inserted rows for the AI columns the table owns.
+  int mark_ai_columns_for_insert();
   int check_view_insertable();
   int check_insert_select_field(ObInsertStmt &insert_stmt,
                                 ObSelectStmt &select_stmt,

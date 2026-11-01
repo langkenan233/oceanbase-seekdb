@@ -595,6 +595,21 @@ public:
     inner_conn_ = inner_conn;
   }
 
+  // Statements that keep an AI column in sync with its input columns. The
+  // resolver fills them in, the DML operator runs them inside the same
+  // transaction so that a rollback takes the tasks with it.
+  inline ObSqlString &get_ai_dml_pre_sql() { return ai_dml_pre_sql_; }
+  inline ObSqlString &get_ai_dml_post_sql() { return ai_dml_post_sql_; }
+  inline bool has_ai_dml_sql() const
+  {
+    return ai_dml_pre_sql_.length() > 0 || ai_dml_post_sql_.length() > 0;
+  }
+  inline void reset_ai_dml_sql()
+  {
+    ai_dml_pre_sql_.reuse();
+    ai_dml_post_sql_.reuse();
+  }
+
   // show trace
 
   ObEndTransAsyncCallback &get_end_trans_cb() { return end_trans_cb_; }
@@ -970,6 +985,9 @@ private:
   bool pl_ps_protocol_; // send query result use this protocol
 
   common::sqlclient::ObISQLConnection *inner_conn_;
+
+  ObSqlString ai_dml_pre_sql_;
+  ObSqlString ai_dml_post_sql_;
 
   ObSessionStat session_stat_;
 
