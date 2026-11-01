@@ -656,9 +656,19 @@ int ObUpdateResolver::add_ai_column_assignment(ObTableAssignment &table_assign,
       assignment.expr_ = const_expr;
     }
   } else {
-    if (OB_FAIL(ObRawExprUtils::build_const_string_expr(*params_.expr_factory_,
+    // The constant has to outlive the resolver, so it is copied into the
+    // statement allocator instead of pointing at a stack buffer.
+    char *request_buf = static_cast<char *>(params_.allocator_->alloc(request_id.length()));
+    if (OB_ISNULL(request_buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      SQL_RESV_LOG(WARN, "allocate ai column request id failed", K(ret));
+    } else {
+      MEMCPY(request_buf, request_id.ptr(), request_id.length());
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_FAIL(ObRawExprUtils::build_const_string_expr(*params_.expr_factory_,
                                                         ObVarcharType,
-                                                        request_id,
+                                                        ObString(request_id.length(), request_buf),
                                                         CS_TYPE_UTF8MB4_BIN,
                                                         const_expr))) {
       SQL_RESV_LOG(WARN, "build request id expr failed", K(ret));
@@ -666,7 +676,15 @@ int ObUpdateResolver::add_ai_column_assignment(ObTableAssignment &table_assign,
       assignment.expr_ = const_expr;
     }
   }
-  if (OB_SUCC(ret) && OB_FAIL(table_assign.assignments_.push_back(assignment))) {
+  if (OB_SUCC(ret)
+      && OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+                                                        *params_.allocator_,
+                                                        *col_item->get_expr(),
+                                                        assignment.expr_,
+                                                        session_info_))) {
+    SQL_RESV_LOG(WARN, "build ai column conversion failed", K(ret),
+                 K(column.get_column_name_str()));
+  } else if (OB_SUCC(ret) && OB_FAIL(table_assign.assignments_.push_back(assignment))) {
     SQL_RESV_LOG(WARN, "add ai column assignment failed", K(ret));
   }
   return ret;
@@ -776,11 +794,6 @@ int ObUpdateResolver::mark_ai_columns_for_update(ObIArray<ObTableAssignment> &ta
                                                   *table_item,
                                                   *state_column,
                                                   1,
-                                                  request_id))) {
-      } else if (OB_FAIL(add_ai_column_assignment(table_assign,
-                                                  *table_item,
-                                                  *request_column,
-                                                  2,
                                                   request_id))) {
       }
     }

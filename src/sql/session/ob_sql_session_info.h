@@ -609,6 +609,10 @@ public:
     ai_dml_pre_sql_.reuse();
     ai_dml_post_sql_.reuse();
   }
+  // The statements the AI column machinery runs need to name the hidden
+  // companion columns, which user statements are not allowed to see.
+  inline void set_ai_column_access(const bool access) { ai_column_access_ = access; }
+  inline bool is_ai_column_access() const { return ai_column_access_; }
 
   // show trace
 
@@ -1023,6 +1027,7 @@ private:
   char action_buf_[common::OB_MAX_ACT_NAME_LENGTH];
   char client_info_buf_[common::OB_MAX_CLIENT_INFO_LENGTH];
   bool is_lock_session_ = false;
+  bool ai_column_access_ = false;
 
 public:
   inline int64_t get_in_bytes() const { return ATOMIC_LOAD(&in_bytes_); }

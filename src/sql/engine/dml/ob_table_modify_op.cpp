@@ -1048,8 +1048,16 @@ int ObTableModifyOp::run_ai_sql_script(const char *sql)
   // The inner statement must see itself as nested, otherwise it would end the
   // statement bookkeeping the outer one still owns.
   const bool saved_nested_flag = das_ctx.ai_column_nested_;
+  ObSQLSessionInfo *session = ctx_.get_my_session();
+  bool saved_access_flag = false;
   das_ctx.ai_column_nested_ = true;
-  if (OB_FAIL(begin_nested_session(true))) {
+  if (NULL != session) {
+    saved_access_flag = session->is_ai_column_access();
+    session->set_ai_column_access(true);
+  }
+  // The statements must see the rows this statement already wrote, so the
+  // tables of the current statement are not skipped.
+  if (OB_FAIL(begin_nested_session(false))) {
     LOG_WARN("begin nested session for ai column failed", K(ret));
   } else {
     int end_ret = OB_SUCCESS;
@@ -1065,6 +1073,9 @@ int ObTableModifyOp::run_ai_sql_script(const char *sql)
     }
   }
   das_ctx.ai_column_nested_ = saved_nested_flag;
+  if (NULL != session) {
+    session->set_ai_column_access(saved_access_flag);
+  }
   return ret;
 }
 
@@ -1077,9 +1088,11 @@ int ObTableModifyOp::exec_ai_column_pre_sql()
     ret = OB_ERR_UNEXPECTED;
   } else if (!session->has_ai_dml_sql()) {
     // this statement does not touch an AI column
-  } else if (OB_FAIL(pre.assign(session->get_ai_dml_pre_sql()))) {
+  } else if (session->get_ai_dml_pre_sql().length() > 0
+             && OB_FAIL(pre.assign(session->get_ai_dml_pre_sql()))) {
     LOG_WARN("copy ai column pre statement failed", K(ret));
-  } else if (OB_FAIL(ai_dml_post_sql_.assign(session->get_ai_dml_post_sql()))) {
+  } else if (session->get_ai_dml_post_sql().length() > 0
+             && OB_FAIL(ai_dml_post_sql_.assign(session->get_ai_dml_post_sql()))) {
     LOG_WARN("copy ai column post statement failed", K(ret));
   } else {
     // The nested statement prepares against this session and would overwrite
@@ -1108,7 +1121,9 @@ int ObTableModifyOp::exec_ai_column_post_sql()
   } else if (!ai_dml_has_post_ && session->has_ai_dml_sql()) {
     // Statements without a pre phase, such as insert and delete, reach this
     // point with the text still in the session slot.
-    if (OB_FAIL(ai_dml_post_sql_.assign(session->get_ai_dml_post_sql()))) {
+    if (session->get_ai_dml_post_sql().length() <= 0) {
+      // nothing to run
+    } else if (OB_FAIL(ai_dml_post_sql_.assign(session->get_ai_dml_post_sql()))) {
       LOG_WARN("copy ai column post statement failed", K(ret));
     } else {
       ai_dml_has_post_ = ai_dml_post_sql_.length() > 0;
