@@ -27,6 +27,7 @@
 #include "query/session/ob_inner_sql_connection_access.h"
 #include "share/ob_ddl_common.h"
 #include "share/inner_table/ob_inner_table_schema_constants.h"
+#include "share/ob_dml_sql_splicer.h"
 #include "sql/printer/ob_schema_printer.h"
 #include "share/autoincrement/ob_i_tablet_autoincrement_admin.h"
 #include "storage/blocksstable/index_block/ob_index_block_util.h"
@@ -1279,6 +1280,217 @@ int ObDDLService::create_tablets_in_trans_(ObIArray<ObTableSchema> &table_schema
   return ret;
 }
 
+// Reads one integer field out of the flat AI column definition record.
+static int64_t ai_def_to_int(const ObString &text, const int64_t default_value)
+{
+  int64_t value = default_value;
+  char buf[32];
+  const int64_t len = text.length();
+  if (len > 0 && len < static_cast<int64_t>(sizeof(buf))) {
+    MEMCPY(buf, text.ptr(), len);
+    buf[len] = '\0';
+    value = strtol(buf, NULL, 10);
+  }
+  return value;
+}
+
+// The AI column definition is a flat record of func type, model name, max
+// retries, sync mode and the original expression text, separated by 0x01.
+static int split_ai_column_def(const ObString &def,
+                               int64_t &func_type,
+                               ObString &model_name,
+                               int64_t &max_retries,
+                               int64_t &sync_mode,
+                               ObString &expr)
+{
+  int ret = OB_SUCCESS;
+  const char sep = '\x01';
+  ObString parts[5];
+  int64_t part_count = 0;
+  const char *const begin = def.ptr();
+  const char *const end = begin + def.length();
+  const char *start = begin;
+  if (def.empty()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else {
+    for (const char *p = begin; part_count < 5;) {
+      if (p == end || sep == *p) {
+        parts[part_count++].assign_ptr(start, static_cast<int32_t>(p - start));
+        if (p == end) {
+          break;
+        }
+        start = p + 1;
+      }
+      ++p;
+    }
+    if (5 != part_count) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      func_type = ai_def_to_int(parts[0], 0);
+      model_name = parts[1];
+      max_retries = ai_def_to_int(parts[2], 0);
+      sync_mode = ai_def_to_int(parts[3], 1);
+      expr = parts[4];
+    }
+  }
+  return ret;
+}
+
+// True when the expression text mentions the column name as a standalone
+// identifier, which is how dependencies are recovered from the stored text.
+static bool ai_column_text_refers_to(const ObString &expr, const ObString &name)
+{
+  bool found = false;
+  const char *const begin = expr.ptr();
+  const char *const end = begin + expr.length();
+  const int64_t name_len = name.length();
+  if (name_len > 0 && NULL != begin) {
+    for (const char *p = begin; !found && p + name_len <= end; ++p) {
+      if (0 != strncasecmp(p, name.ptr(), static_cast<size_t>(name_len))) {
+        continue;
+      }
+      const char prev = (p == begin) ? '\0' : *(p - 1);
+      const char next = (p + name_len == end) ? '\0' : *(p + name_len);
+      const bool prev_ok = !(isalnum(static_cast<unsigned char>(prev)) || '_' == prev
+                             || '$' == prev || '.' == prev);
+      const bool next_ok = !(isalnum(static_cast<unsigned char>(next)) || '_' == next
+                             || '$' == next);
+      found = prev_ok && next_ok;
+    }
+  }
+  return found;
+}
+
+// The system prompt fragment that asks the model for the type the column holds.
+static const char *ai_column_type_hint(const ObObjType data_type)
+{
+  const char *hint = NULL;
+  if (ob_is_json_tc(data_type)) {
+    hint = " Return exactly one valid JSON value.";
+  } else if (ob_is_integer_type(data_type)) {
+    hint = " Return the answer as a base-10 integer.";
+  }
+  return hint;
+}
+
+int ObDDLService::insert_ai_column_schemas(ObIArray<ObTableSchema> &table_schemas,
+                                           ObMySQLTransaction &trans)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_schemas.count(); ++i) {
+    if (OB_FAIL(insert_ai_column_rows(table_schemas.at(i), trans))) {
+      LOG_WARN("insert ai column rows failed", K(ret));
+    }
+  }
+  return ret;
+}
+
+int ObDDLService::insert_ai_column_rows(const ObTableSchema &table_schema,
+                                        ObMySQLTransaction &trans)
+{
+  int ret = OB_SUCCESS;
+  const int64_t column_cnt = table_schema.get_column_count();
+  for (int64_t j = 0; OB_SUCC(ret) && j < column_cnt; ++j) {
+    const ObColumnSchemaV2 *ai_col = table_schema.get_column_schema_by_idx(j);
+    ObString ai_def;
+    if (OB_ISNULL(ai_col) || !ai_col->is_ai_column() || !ai_col->get_ai_column_def(ai_def)) {
+      continue;
+    }
+    int64_t func_type = 0;
+    int64_t max_retries = 0;
+    int64_t sync_mode = 1;
+    ObString model_name;
+    ObString expr;
+    const ObString &col_name = ai_col->get_column_name_str();
+    if (OB_FAIL(split_ai_column_def(ai_def, func_type, model_name, max_retries,
+                                    sync_mode, expr))) {
+      LOG_WARN("split ai column definition failed", K(ret), K(ai_def));
+    } else {
+      char name_buf[OB_MAX_COLUMN_NAME_LENGTH];
+      const char *const prefixes[] = {"__ai_state_", "__ai_request_", "__ai_result_spec_"};
+      int64_t hidden_ids[3] = {-1, -1, -1};
+      for (int64_t k = 0; OB_SUCC(ret) && k < 3; ++k) {
+        const int64_t prefix_len = static_cast<int64_t>(STRLEN(prefixes[k]));
+        int64_t copy_len = col_name.length();
+        if (copy_len > OB_MAX_COLUMN_NAME_LENGTH - prefix_len) {
+          copy_len = OB_MAX_COLUMN_NAME_LENGTH - prefix_len;
+        }
+        MEMCPY(name_buf, prefixes[k], prefix_len);
+        MEMCPY(name_buf + prefix_len, col_name.ptr(), copy_len);
+        const ObColumnSchemaV2 *hidden_col =
+            table_schema.get_column_schema(ObString(static_cast<int32_t>(prefix_len + copy_len),
+                                                    name_buf));
+        if (NULL == hidden_col) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("ai hidden column is missing", K(ret), K(col_name), K(k));
+        } else {
+          hidden_ids[k] = hidden_col->get_column_id();
+        }
+      }
+      // The dependency list is recovered from the stored expression text, so
+      // that a change of the base columns can invalidate the cached result.
+      // An AI column derived from another AI column is rejected here.
+      ObSqlString dep_ids;
+      if (OB_SUCC(ret)) {
+        for (int64_t k = 0; OB_SUCC(ret) && k < column_cnt; ++k) {
+          const ObColumnSchemaV2 *dep_col = table_schema.get_column_schema_by_idx(k);
+          if (OB_ISNULL(dep_col) || dep_col->is_hidden()
+              || dep_col->get_column_id() == ai_col->get_column_id()) {
+            continue;
+          } else if (!ai_column_text_refers_to(expr, dep_col->get_column_name_str())) {
+            continue;
+          } else if (dep_col->is_ai_column()) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_WARN("ai column depends on another ai column", K(ret), K(col_name),
+                     K(dep_col->get_column_name_str()));
+          } else if (dep_ids.length() > 0 && OB_FAIL(dep_ids.append(","))) {
+            LOG_WARN("append dependency separator failed", K(ret));
+          } else if (OB_FAIL(dep_ids.append_fmt("%lu", dep_col->get_column_id()))) {
+            LOG_WARN("append dependency id failed", K(ret));
+          }
+        }
+      }
+      ObSqlString normalized;
+      const char *hint = ai_column_type_hint(ai_col->get_data_type());
+      if (OB_FAIL(ret)) {
+      } else if (OB_FAIL(normalized.append(expr))) {
+        LOG_WARN("append ai column expression failed", K(ret));
+      } else if (NULL != hint && OB_FAIL(normalized.append(hint))) {
+        LOG_WARN("append ai column type hint failed", K(ret));
+      } else {
+        ObDMLSqlSplicer sql;
+        ObSqlString buffer;
+        int64_t affected_rows = 0;
+        const ObHexEscapeSqlStr escaped_name(col_name);
+        const ObHexEscapeSqlStr escaped_model(model_name);
+        const ObHexEscapeSqlStr escaped_expr(expr);
+        const ObHexEscapeSqlStr escaped_deps(dep_ids.string());
+        const ObHexEscapeSqlStr escaped_normalized(normalized.string());
+        if (OB_FAIL(sql.add_pk_column("table_id", table_schema.get_table_id()))) {
+        } else if (OB_FAIL(sql.add_pk_column("column_id", ai_col->get_column_id()))) {
+        } else if (OB_FAIL(sql.add_column("column_name", escaped_name))) {
+        } else if (OB_FAIL(sql.add_column("sync_mode", sync_mode))) {
+        } else if (OB_FAIL(sql.add_column("max_retries", max_retries))) {
+        } else if (OB_FAIL(sql.add_column("state_column_id", hidden_ids[0]))) {
+        } else if (OB_FAIL(sql.add_column("request_column_id", hidden_ids[1]))) {
+        } else if (OB_FAIL(sql.add_column("result_spec_column_id", hidden_ids[2]))) {
+        } else if (OB_FAIL(sql.add_column("model_name", escaped_model))) {
+        } else if (OB_FAIL(sql.add_column("func_type", func_type))) {
+        } else if (OB_FAIL(sql.add_column("result_type",
+                                          static_cast<int64_t>(ai_col->get_data_type())))) {
+        } else if (OB_FAIL(sql.add_column("expression", escaped_expr))) {
+        } else if (OB_FAIL(sql.add_column("depend_column_ids", escaped_deps))) {
+        } else if (OB_FAIL(sql.add_column("normalized_expr", escaped_normalized))) {
+        } else if (OB_FAIL(sql.splice_insert_update_sql(OB_ALL_AI_COLUMN_TNAME, buffer))) {
+        } else if (OB_FAIL(trans.write(buffer.ptr(), affected_rows))) {
+          LOG_WARN("insert ai column record failed", K(ret), K(buffer));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObDDLService::create_tables_in_trans(const bool if_not_exist,
                                          const ObString &ddl_stmt_str,
                                          const ObErrorInfo &error_info,
@@ -1419,6 +1631,9 @@ int ObDDLService::create_tables_in_trans(const bool if_not_exist,
 
       if (OB_SUCC(ret) && OB_FAIL(create_tablets_in_trans_(
           table_schemas, ddl_operator, trans, schema_guard, data_format_version))) {
+      }
+      if (OB_SUCC(ret) && OB_FAIL(insert_ai_column_schemas(table_schemas, trans))) {
+        LOG_WARN("insert ai column metadata failed", K(ret));
       }
       RS_TRACE(operator_create_table_end);
     }
@@ -10460,6 +10675,8 @@ int ObDDLService::alter_table_in_trans(obcall::ObAlterTableArg &alter_table_arg,
                 &global_idx_schema_array,
                 &idx_schema_versions))) {
           ObString origin_table_name = alter_table_schema.get_origin_table_name();
+        } else if (OB_FAIL(insert_ai_column_rows(new_table_schema, trans))) {
+          LOG_WARN("insert ai column metadata failed", K(ret));
         } else if (is_rename_and_need_table_lock &&
             OB_FAIL(build_rw_defense_for_table_(
                 new_table_schema,

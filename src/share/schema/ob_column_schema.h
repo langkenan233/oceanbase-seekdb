@@ -293,6 +293,24 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline bool is_domain_index_column() const { return is_vec_index_column() || is_fulltext_column() || is_multivalue_generated_column() || is_multivalue_generated_array_column(); }
   inline bool has_generated_column_deps() const { return column_flags_ & GENERATED_DEPS_CASCADE_FLAG; }
   inline bool is_invisible_column() const { return column_flags_ & INVISIBLE_COLUMN_FLAG; }
+  inline bool is_ai_column() const { return column_flags_ & AI_COLUMN_FLAG; }
+  inline void set_ai_column_flag() { column_flags_ |= AI_COLUMN_FLAG; }
+  inline bool is_ai_column_state() const { return column_flags_ & AI_COLUMN_STATE_COLUMN_FLAG; }
+  inline void set_ai_column_state() { column_flags_ |= AI_COLUMN_STATE_COLUMN_FLAG; }
+  inline bool is_ai_column_request() const { return column_flags_ & AI_COLUMN_REQUEST_COLUMN_FLAG; }
+  inline void set_ai_column_request() { column_flags_ |= AI_COLUMN_REQUEST_COLUMN_FLAG; }
+  inline bool is_ai_column_result_spec() const { return column_flags_ & AI_COLUMN_RESULT_SPEC_COLUMN_FLAG; }
+  inline void set_ai_column_result_spec() { column_flags_ |= AI_COLUMN_RESULT_SPEC_COLUMN_FLAG; }
+  inline bool is_ai_hidden_column() const
+  {
+    return column_flags_ & (AI_COLUMN_STATE_COLUMN_FLAG | AI_COLUMN_REQUEST_COLUMN_FLAG
+                            | AI_COLUMN_RESULT_SPEC_COLUMN_FLAG);
+  }
+  // The AI definition travels inside extended_type_info, an array that is only
+  // otherwise used by enum and set columns, so a tagged single element is
+  // enough to carry it through schema persistence.
+  int set_ai_column_def(const common::ObString &def);
+  bool get_ai_column_def(common::ObString &def) const;
   inline bool has_column_flag(int64_t flag) const { return column_flags_ & flag; }
   inline int64_t get_column_flags() const { return column_flags_; }
   //these column flags must be stored in __all_column

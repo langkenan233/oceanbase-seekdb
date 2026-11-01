@@ -106,6 +106,53 @@ int ObCreateTableResolver::add_primary_key_part(const ObString &column_name,
   return ret;
 }
 
+int ObCreateTableResolver::gen_ai_hidden_columns(ObTableSchema &table_schema,
+                                                 const ObColumnSchemaV2 &ai_column,
+                                                 ObIArray<ObColumnSchemaV2> &resolved_cols)
+{
+  int ret = OB_SUCCESS;
+  const char *const prefixes[] = {"__ai_state_", "__ai_request_", "__ai_result_spec_"};
+  const int64_t varchar_lengths[] = {0, 64, 256};
+  const ObString user_name = ai_column.get_column_name_str();
+  for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+    const int64_t prefix_len = static_cast<int64_t>(STRLEN(prefixes[i]));
+    int64_t copy_len = user_name.length();
+    char name_buf[OB_MAX_COLUMN_NAME_LENGTH];
+    ObColumnSchemaV2 hidden;
+    if (copy_len > OB_MAX_COLUMN_NAME_LENGTH - prefix_len) {
+      copy_len = OB_MAX_COLUMN_NAME_LENGTH - prefix_len;
+    }
+    MEMCPY(name_buf, prefixes[i], prefix_len);
+    MEMCPY(name_buf + prefix_len, user_name.ptr(), copy_len);
+    hidden.set_table_id(table_schema.get_table_id());
+    hidden.set_column_id(gen_column_id());
+    hidden.set_column_name(ObString(static_cast<int32_t>(prefix_len + copy_len), name_buf));
+    hidden.set_nullable(true);
+    hidden.set_is_hidden(true);
+    hidden.set_charset_type(CHARSET_UTF8MB4);
+    hidden.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+    if (0 == varchar_lengths[i]) {
+      hidden.set_data_type(ObIntType);
+      hidden.set_accuracy(ObAccuracy::DDL_DEFAULT_ACCURACY[ObIntType]);
+      hidden.set_ai_column_state();
+    } else {
+      ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY[ObVarcharType];
+      hidden.set_data_type(ObVarcharType);
+      accuracy.set_length(varchar_lengths[i]);
+      hidden.set_accuracy(accuracy);
+      if (1 == i) {
+        hidden.set_ai_column_request();
+      } else {
+        hidden.set_ai_column_result_spec();
+      }
+    }
+    if (OB_FAIL(resolved_cols.push_back(hidden))) {
+      SQL_RESV_LOG(WARN, "push ai hidden column failed", K(ret), K(hidden));
+    }
+  }
+  return ret;
+}
+
 int ObCreateTableResolver::add_hidden_tablet_seq_col()
 {
   int ret = OB_SUCCESS;
@@ -881,6 +928,26 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
         // won't be here
         ret = OB_ERR_UNEXPECTED;
         SQL_RESV_LOG(WARN, "unexpected branch", K(ret));
+      }
+    }
+
+    // Every AI column owns three hidden columns: the per row task state, the
+    // request id that produced the current value, and the definition spec used
+    // for it. They come after all user columns so that user column ids stay in
+    // declaration order.
+    if (OB_SUCC(ret)) {
+      // The AI columns are copied out first: generating the hidden columns pushes
+      // into resolved_cols and would otherwise invalidate the references.
+      ObSEArray<ObColumnSchemaV2, 4> ai_columns;
+      for (int32_t i = 0; OB_SUCC(ret) && i < resolved_cols_count; i++) {
+        if (resolved_cols.at(i).is_ai_column() && OB_FAIL(ai_columns.push_back(resolved_cols.at(i)))) {
+          SQL_RESV_LOG(WARN, "collect ai columns failed", K(ret));
+        }
+      }
+      for (int32_t i = 0; OB_SUCC(ret) && i < ai_columns.count(); i++) {
+        if (OB_FAIL(gen_ai_hidden_columns(table_schema, ai_columns.at(i), resolved_cols))) {
+          SQL_RESV_LOG(WARN, "generate hidden columns for ai column failed", K(ret));
+        }
       }
     }
 

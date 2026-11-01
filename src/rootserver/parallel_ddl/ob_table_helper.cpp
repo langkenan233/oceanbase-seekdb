@@ -210,6 +210,8 @@ int ObTableHelper::create_tables_(const ObString *ddl_stmt_str)
                 get_trans_(),
                 ddl_stmt_str,
                 true/*sync_schema_version_for_last_table*/))) {
+    } else if (OB_FAIL(ddl_service_->insert_ai_column_schemas(new_tables_, get_trans_()))) {
+      LOG_WARN("insert ai column metadata failed", K(ret));
     }
   }
   return ret;

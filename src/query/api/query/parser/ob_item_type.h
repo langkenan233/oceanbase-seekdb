@@ -2194,6 +2194,8 @@ typedef enum ObItemType
   T_FILE_TABLE_EXPRESSION = 4921,
   T_FILE_TABLE_ARG = 4922,
   T_DESCRIBE_SELECT_STMT = 4923,
+  T_AI_COLUMN_ATTR = 4924,
+  T_ALTER_AI_COLUMN_RETRY = 4925,
 
   // parser config: ik_mode
   T_IK_MODE = 4800,

@@ -830,6 +830,12 @@ static int get_runtime_schema_guard_with_version_in_inner_table(share::schema::O
     const share::schema::ObTableSchema &orig_table_schema,
     const bool need_redistribute_column_id,
     share::schema::ObTableSchema &new_table_schema);
+  // Records one row per AI column in __all_ai_column so that the background
+  // worker and the retry path can find the hidden columns without a schema scan.
+  int insert_ai_column_schemas(common::ObIArray<share::schema::ObTableSchema> &table_schemas,
+                               ObMySQLTransaction &trans);
+  int insert_ai_column_rows(const share::schema::ObTableSchema &table_schema,
+                            ObMySQLTransaction &trans);
 private:
   static const int64_t WAIT_ELECT_LEADER_TIMEOUT_US = 120 * 1000 * 1000;  // 120s
   static const int64_t REFRESH_SCHEMA_INTERVAL_US = 500 * 1000;              //500ms

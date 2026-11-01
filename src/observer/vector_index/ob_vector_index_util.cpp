@@ -1693,13 +1693,22 @@ int ObVectorIndexUtil::get_vector_dim_from_extend_type_info(const ObIArray<ObStr
 {
   int ret = OB_SUCCESS;
   dim = 0;
-  if (extend_type_info.count() != 1) {
+  // An AI column carries its definition in the same array, so the vector entry
+  // is looked up rather than assumed to be the only element.
+  ObString extend_type_info_str;
+  for (int64_t i = 0; i < extend_type_info.count() && extend_type_info_str.empty(); ++i) {
+    const ObString &item = extend_type_info.at(i);
+    if ((item.length() > 6 && 0 == strncasecmp(item.ptr(), "VECTOR", 6))
+        || 0 == item.compare("SPARSEVECTOR")) {
+      extend_type_info_str = item;
+    }
+  }
+  if (extend_type_info_str.empty()) {
     // Vector index columns currently only support single column vector indexes.
     // When building the vector column of the auxiliary table, only one column of extend_type_info is assigned.
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "vector column index only support build on one vector column");
   } else {
-    ObString extend_type_info_str = extend_type_info.at(0);
     ObString spilt_str = extend_type_info_str.split_on('(').trim();
     if (0 == spilt_str.compare("ARRAY") || 0 == spilt_str.compare("MAP")) {
       ret = OB_NOT_SUPPORTED;

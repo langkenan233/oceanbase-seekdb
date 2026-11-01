@@ -2447,6 +2447,70 @@ all_ai_model_endpoint_def = dict(
 def_table_schema(**all_ai_model_endpoint_def)
 
 
+# An AI column is a user visible result column plus three hidden columns. The
+# definition itself lives here so that a row can be validated, retried and
+# rewritten without looking at the parse tree again.
+all_ai_column_def = dict(
+    owner = 'ai_column',
+    table_name = '__all_ai_column',
+    table_id = '1131',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('table_id', 'int'),
+        ('column_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:OB_MAX_COLUMN_NAME_LENGTH', 'false', ''),
+        ('sync_mode', 'int', 'false', 1),
+        ('max_retries', 'int', 'false', 0),
+        ('state_column_id', 'int', 'false', -1),
+        ('request_column_id', 'int', 'false', -1),
+        ('result_spec_column_id', 'int', 'false', -1),
+        ('model_name', 'varchar:128', 'true'),
+        ('func_type', 'int', 'false', 0),
+        ('result_type', 'int', 'false', 0),
+        ('depend_column_ids', 'varchar:2048', 'true'),
+        ('expression', 'varchar:4000', 'true'),
+        ('normalized_expr', 'varchar:4000', 'true'),
+        ('def_version', 'int', 'false', 0)
+    ]
+)
+def_table_schema(**all_ai_column_def)
+
+# One row per (row, ai column) waiting to be produced. Rows created by the same
+# statement on the same row share one request_id so that they are published
+# together.
+all_ai_column_task_def = dict(
+    owner = 'ai_column',
+    table_name = '__all_ai_column_task',
+    table_id = '1132',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('table_id', 'int'),
+        ('task_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('request_id', 'varchar:64', 'true'),
+        ('column_id', 'int', 'false', -1),
+        ('def_version', 'int', 'false', 0),
+        ('state', 'int', 'false', 0),
+        ('retry_count', 'int', 'false', 0),
+        ('rowkey_predicate', 'varchar:2048', 'true'),
+        ('eligible_ts', 'int', 'false', 0),
+        ('worker_id', 'varchar:128', 'true')
+    ]
+)
+def_table_schema(**all_ai_column_task_def)
+
+
 all_objauth_mysql_def = dict(
     owner = 'cjl476581',
     table_name     = '__all_objauth_mysql',

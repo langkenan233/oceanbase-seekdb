@@ -3457,11 +3457,71 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
         if (OB_SUCC(ret)) {
           if (OB_FAIL(alter_table_stmt->add_column(alter_column_schema))) {
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
+          } else if (alter_column_schema.is_ai_column()
+                     && OB_FAIL(gen_ai_hidden_alter_columns(
+                         alter_column_schema,
+                         alter_table_stmt->get_alter_table_arg().alter_table_schema_))) {
+            SQL_RESV_LOG(WARN, "generate hidden columns for the ai column failed", K(ret));
           }
         }
       }
     }
     add_column_cnt_++;
+  }
+  return ret;
+}
+
+int ObAlterTableResolver::gen_ai_hidden_alter_columns(const AlterColumnSchema &ai_column,
+                                                      AlterTableSchema &alter_table_schema)
+{
+  int ret = OB_SUCCESS;
+  const char *const prefixes[] = {"__ai_state_", "__ai_request_", "__ai_result_spec_"};
+  const int64_t varchar_lengths[] = {0, 64, 256};
+  const ObString user_name = ai_column.get_column_name_str();
+  for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+    const int64_t prefix_len = static_cast<int64_t>(STRLEN(prefixes[i]));
+    int64_t copy_len = user_name.length();
+    if (copy_len > OB_MAX_COLUMN_NAME_LENGTH - prefix_len) {
+      copy_len = OB_MAX_COLUMN_NAME_LENGTH - prefix_len;
+    }
+    // The name has to outlive the statement, the alter schema only keeps the
+    // pointer.
+    const int32_t name_len = static_cast<int32_t>(prefix_len + copy_len);
+    char *name_buf = NULL;
+    if (OB_ISNULL(params_.allocator_)
+        || OB_ISNULL(name_buf = static_cast<char *>(params_.allocator_->alloc(name_len + 1)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      SQL_RESV_LOG(WARN, "allocate ai hidden column name failed", K(ret));
+    } else {
+      MEMCPY(name_buf, prefixes[i], prefix_len);
+      MEMCPY(name_buf + prefix_len, user_name.ptr(), copy_len);
+      name_buf[name_len] = '\0';
+      AlterColumnSchema hidden;
+      hidden.set_column_name(ObString(name_len, name_buf));
+      hidden.set_nullable(true);
+      hidden.set_is_hidden(true);
+      hidden.set_charset_type(CHARSET_UTF8MB4);
+      hidden.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+      hidden.alter_type_ = OB_DDL_ADD_COLUMN;
+      if (0 == varchar_lengths[i]) {
+        hidden.set_data_type(ObIntType);
+        hidden.set_accuracy(ObAccuracy::DDL_DEFAULT_ACCURACY[ObIntType]);
+        hidden.set_ai_column_state();
+      } else {
+        ObAccuracy accuracy = ObAccuracy::DDL_DEFAULT_ACCURACY[ObVarcharType];
+        accuracy.set_length(varchar_lengths[i]);
+        hidden.set_data_type(ObVarcharType);
+        hidden.set_accuracy(accuracy);
+        if (1 == i) {
+          hidden.set_ai_column_request();
+        } else {
+          hidden.set_ai_column_result_spec();
+        }
+      }
+      if (OB_FAIL(alter_table_schema.add_alter_column(hidden, true))) {
+        SQL_RESV_LOG(WARN, "add ai hidden column failed", K(ret), K(hidden));
+      }
+    }
   }
   return ret;
 }

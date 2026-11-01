@@ -513,6 +513,40 @@ int ObColumnSchemaV2::set_extended_type_info(const ObIArray<common::ObString> &i
   return deep_copy_string_array(info, extended_type_info_);
 }
 
+// An AI column keeps its definition in the same array that enum and set use.
+// The two never meet on one column, and the tag keeps a definition apart from
+// anything else that may end up in the array.
+static const char *const AI_COLUMN_DEF_PREFIX = "#AI#";
+
+int ObColumnSchemaV2::set_ai_column_def(const ObString &def)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString buffer;
+  if (OB_FAIL(buffer.append(AI_COLUMN_DEF_PREFIX))) {
+    SHARE_SCHEMA_LOG(WARN, "append ai column prefix failed", K(ret));
+  } else if (OB_FAIL(buffer.append(def))) {
+    SHARE_SCHEMA_LOG(WARN, "append ai column definition failed", K(ret));
+  } else if (OB_FAIL(add_type_info(buffer.string()))) {
+    SHARE_SCHEMA_LOG(WARN, "store ai column definition failed", K(ret));
+  }
+  return ret;
+}
+
+bool ObColumnSchemaV2::get_ai_column_def(ObString &def) const
+{
+  bool found = false;
+  const int64_t prefix_len = static_cast<int64_t>(STRLEN(AI_COLUMN_DEF_PREFIX));
+  for (int64_t i = 0; !found && i < extended_type_info_.count(); ++i) {
+    const ObString &item = extended_type_info_.at(i);
+    if (item.length() > prefix_len
+        && 0 == MEMCMP(item.ptr(), AI_COLUMN_DEF_PREFIX, prefix_len)) {
+      def.assign_ptr(item.ptr() + prefix_len, static_cast<int32_t>(item.length() - prefix_len));
+      found = true;
+    }
+  }
+  return found;
+}
+
 int ObColumnSchemaV2::add_type_info(const ObString &type_info)
 {
   return add_string_to_array(type_info, extended_type_info_);

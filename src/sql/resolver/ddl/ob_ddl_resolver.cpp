@@ -2275,6 +2275,12 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
         }
         break;
       }
+      case T_AI_COLUMN_ATTR: {
+        if (OB_FAIL(resolve_ai_column_attribute(column, attr_node))) {
+          SQL_RESV_LOG(WARN, "resolve ai column attribute failed", K(ret));
+        }
+        break;
+      }
       case T_LOB_CHUNK_SIZE:
       case T_CONSTR_LOB_CHUNK_SIZE: {
         if (OB_FAIL(resolve_lob_chunk_size(column, *attr_node))) {
@@ -2334,6 +2340,243 @@ int ObDDLResolver::resolve_normal_column_attribute(ObColumnSchemaV2 &column,
           SQL_RESV_LOG(WARN, "wrong column type for auto_increment", K(ret));
         }
       }
+    }
+  }
+  return ret;
+}
+
+// Separator used inside the stored AI column definition. The definition is a
+// flat record rather than JSON so that it survives any charset round trip.
+const char AI_COLUMN_DEF_SEP = '\x01';
+
+// Reads the dimension out of a "VECTOR(n)" type info entry.
+static int64_t ai_column_parse_vector_dim(const ObString &type_info)
+{
+  int64_t dim = -1;
+  const char *begin = type_info.ptr();
+  const char *end = begin + type_info.length();
+  const char *left = NULL;
+  const char *right = NULL;
+  for (const char *p = begin; NULL == left && p < end; ++p) {
+    if ('(' == *p) {
+      left = p;
+    }
+  }
+  for (const char *p = NULL == left ? end : left; p < end; ++p) {
+    if (')' == *p) {
+      right = p;
+      break;
+    }
+  }
+  if (NULL != left && NULL != right && right > left + 1) {
+    int64_t value = 0;
+    bool digits = true;
+    for (const char *p = left + 1; p < right; ++p) {
+      if (*p < '0' || *p > '9') {
+        digits = false;
+        break;
+      }
+      value = value * 10 + (*p - '0');
+    }
+    if (digits) {
+      dim = value;
+    }
+  }
+  return dim;
+}
+
+// Counts the arguments of a function call. Parameters arrive either as a flat
+// expression list or as a link list depending on how the call was written.
+static int64_t ai_column_arg_count(ParseNode *params)
+{
+  int64_t count = 0;
+  if (NULL != params) {
+    if (T_EXPR_LIST == params->type_) {
+      count = params->num_child_;
+    } else {
+      ParseNode *node = params;
+      while (NULL != node) {
+        ++count;
+        node = (T_LINK_NODE == node->type_) ? node->children_[1] : NULL;
+      }
+    }
+  }
+  return count;
+}
+
+static ParseNode *ai_column_arg_at(ParseNode *params, const int64_t index)
+{
+  ParseNode *arg = NULL;
+  if (NULL != params && index >= 0) {
+    if (T_EXPR_LIST == params->type_) {
+      if (index < params->num_child_) {
+        arg = params->children_[index];
+      }
+    } else {
+      ParseNode *node = params;
+      int64_t seen = 0;
+      while (NULL != node && NULL == arg) {
+        if (T_LINK_NODE == node->type_) {
+          if (seen == index) {
+            arg = node->children_[0];
+          }
+          ++seen;
+          node = node->children_[1];
+        } else {
+          if (seen == index) {
+            arg = node;
+          }
+          node = NULL;
+        }
+      }
+    }
+  }
+  return arg;
+}
+
+// The WITH option list and every name/value pair share the same binary link
+// node type, so an inner link as the first child means "this node is a list"
+// and a plain token means "this node is a pair".
+static int ai_column_apply_options(ParseNode *node, int64_t &max_retries, int64_t &sync_mode)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node)) {
+  } else if (T_LINK_NODE != node->type_ || 2 != node->num_child_
+             || OB_ISNULL(node->children_[0]) || OB_ISNULL(node->children_[1])) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai column option node", K(ret));
+  } else if (T_LINK_NODE == node->children_[0]->type_) {
+    if (OB_FAIL(ai_column_apply_options(node->children_[0], max_retries, sync_mode))) {
+    } else if (OB_FAIL(ai_column_apply_options(node->children_[1], max_retries, sync_mode))) {
+    }
+  } else {
+    ObString name(node->children_[0]->str_len_, node->children_[0]->str_value_);
+    ParseNode *value = node->children_[1];
+    if (0 == name.case_compare("max_retries")) {
+      if (T_INT == value->type_) {
+        max_retries = value->value_;
+      } else {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai column, max_retries must be an integer");
+      }
+    } else if (0 == name.case_compare("sync_mode")) {
+      ObString mode(value->str_len_, value->str_value_);
+      if (0 == mode.case_compare("async")) {
+        sync_mode = 1;
+      } else if (0 == mode.case_compare("sync")) {
+        sync_mode = 0;
+      } else {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai column, sync_mode must be sync or async");
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column, ParseNode *attr_node){
+  int ret = OB_SUCCESS;
+  ParseNode *func_node = NULL;
+  ParseNode *opt_node = NULL;
+  ParseNode *text_node = NULL;
+  int64_t func_type = -1;
+  ObString model_name;
+  int64_t max_retries = 0;
+  int64_t sync_mode = 1;
+
+  if (OB_ISNULL(attr_node) || 3 != attr_node->num_child_) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid AI COLUMN attribute node", K(ret));
+  } else if (OB_ISNULL(func_node = attr_node->children_[0])
+             || OB_ISNULL(text_node = attr_node->children_[2])) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "AI COLUMN expression is missing", K(ret));
+  } else if (OB_ISNULL(text_node->str_value_) || text_node->str_len_ <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "AI COLUMN expression text is missing", K(ret));
+  } else if (T_FUN_SYS != func_node->type_
+             || func_node->num_child_ < 2
+             || OB_ISNULL(func_node->children_[0])) {
+    ret = OB_NOT_SUPPORTED;
+    SQL_RESV_LOG(WARN, "AI COLUMN expression is not an AI function", K(ret));
+  } else {
+    ObString func_name(func_node->children_[0]->str_len_,
+                       func_node->children_[0]->str_value_);
+    if (0 == func_name.case_compare("ai_complete")) {
+      func_type = 0;
+    } else if (0 == func_name.case_compare("ai_embed")) {
+      func_type = 1;
+    } else {
+      ret = OB_NOT_SUPPORTED;
+      SQL_RESV_LOG(WARN, "AI COLUMN only accepts AI_COMPLETE or AI_EMBED", K(ret), K(func_name));
+    }
+  }
+
+  // Walk the argument list: model name first, prompt or content second, and an
+  // optional dimension for embeddings.
+  if (OB_SUCC(ret)) {
+    ParseNode *params = func_node->children_[1];
+    int64_t param_count = ai_column_arg_count(params);
+    ParseNode *model_arg = ai_column_arg_at(params, 0);
+    ParseNode *dim_arg = (1 == func_type) ? ai_column_arg_at(params, 2) : NULL;
+    int64_t arg_dim = -1;
+    if (NULL == model_arg || OB_ISNULL(model_arg->str_value_)
+        || (T_VARCHAR != model_arg->type_ && T_CHAR != model_arg->type_)) {
+      ret = OB_INVALID_ARGUMENT;
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai column, model name must be a string constant");
+    } else {
+      model_name.assign_ptr(model_arg->str_value_, static_cast<int32_t>(model_arg->str_len_));
+    }
+    if (OB_SUCC(ret) && NULL != dim_arg && T_INT == dim_arg->type_) {
+      arg_dim = dim_arg->value_;
+    }
+    if (OB_SUCC(ret) && (param_count < 2 || param_count > 3)) {
+      ret = OB_ERR_PARAM_SIZE;
+      SQL_RESV_LOG(WARN, "wrong number of arguments to AI COLUMN", K(ret), K(param_count));
+    }
+    if (OB_SUCC(ret) && 1 == func_type && arg_dim >= 0) {
+      int64_t expected_dim = -1;
+      const ObIArray<ObString> &type_info = column.get_extended_type_info();
+      for (int64_t i = 0; -1 == expected_dim && i < type_info.count(); ++i) {
+        expected_dim = ai_column_parse_vector_dim(type_info.at(i));
+      }
+      if (-1 == expected_dim) {
+        ret = OB_ERR_INVALID_VECTOR_DIM;
+        LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM,
+                       static_cast<uint32_t>(0), static_cast<uint32_t>(arg_dim));
+        SQL_RESV_LOG(WARN, "AI_EMBED needs a vector column", K(ret), K(column));
+      } else if (expected_dim != arg_dim) {
+        ret = OB_ERR_INVALID_VECTOR_DIM;
+        LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM,
+                       static_cast<uint32_t>(expected_dim), static_cast<uint32_t>(arg_dim));
+        SQL_RESV_LOG(WARN, "AI_EMBED dimension mismatch", K(ret), K(expected_dim), K(arg_dim));
+      }
+    }
+  }
+
+  // Optional WITH (...) list. Every option is a name/value pair; only the two
+  // that the worker needs are read here.
+  if (OB_SUCC(ret) && NULL != (opt_node = attr_node->children_[1])
+      && OB_FAIL(ai_column_apply_options(opt_node, max_retries, sync_mode))) {
+  }
+
+  if (OB_SUCC(ret)) {
+    ObSqlString def;
+    if (OB_FAIL(def.append_fmt("%ld%c%.*s%c%ld%c%ld%c%.*s",
+                               func_type,
+                               AI_COLUMN_DEF_SEP,
+                               model_name.length(), model_name.ptr(),
+                               AI_COLUMN_DEF_SEP,
+                               max_retries,
+                               AI_COLUMN_DEF_SEP,
+                               sync_mode,
+                               AI_COLUMN_DEF_SEP,
+                               static_cast<int>(text_node->str_len_), text_node->str_value_))) {
+      SQL_RESV_LOG(WARN, "build ai column definition failed", K(ret));
+    } else if (OB_FAIL(column.set_ai_column_def(def.string()))) {
+      SQL_RESV_LOG(WARN, "store ai column definition failed", K(ret));
+    } else {
+      column.set_ai_column_flag();
     }
   }
   return ret;

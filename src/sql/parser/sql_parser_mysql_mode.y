@@ -334,7 +334,7 @@ END_P SET_VAR DELIMITER
 
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
-        RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
+        RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE RETRY
         REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
@@ -404,6 +404,7 @@ END_P SET_VAR DELIMITER
 %type <node> simple_select no_table_select limit_clause select_expr_list opt_approx
 %type <node> with_select with_clause with_list common_table_expr opt_column_alias_name_list alias_name_list column_alias_name
 %type <node> opt_where opt_hint_value opt_groupby opt_rollup opt_order_by order_by opt_having groupby_clause order_by_opt_null
+%type <node> opt_ai_column_with ai_column_option_list ai_column_option ai_column_attribute
 %type <node> opt_limit_clause limit_expr opt_lock_type opt_for_update opt_for_update_wait opt_lock_in_share_mode
 %type <node> sort_list sort_key opt_asc_desc sort_list_for_group_by sort_key_for_group_by opt_asc_desc_for_group_by sort_list_opt_null sort_key_opt_null opt_asc_desc_null
 %type <node> opt_query_expression_option_list query_expression_option_list query_expression_option opt_distinct opt_distinct_or_all opt_separator projection
@@ -4921,6 +4922,20 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   set_data_type_collation($2, attributes, false, true);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, $2, attributes, $5);
 }
+| column_definition_ref data_type ai_column_attribute opt_column_attribute_list opt_column_reference opt_position_column
+{
+  (void)($5);
+  ParseNode *attributes = NULL;
+  if (NULL == $4) {
+    merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, $3);
+  } else {
+    ParseNode *ai_link = NULL;
+    malloc_non_terminal_node(ai_link, result->malloc_pool_, T_LINK_NODE, 2, $3, $4);
+    merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, ai_link);
+  }
+  set_data_type_collation($2, attributes, false, true);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 4, $1, $2, attributes, $6);
+}
 | column_definition_ref data_type opt_collation opt_generated_keyname AS '(' expr ')' opt_storage_type opt_generated_column_attribute_list opt_column_reference opt_position_column
 {
   (void)($11);
@@ -6322,6 +6337,20 @@ not NULLX
 }
 ;
 
+/* An AI column is declared right after the column type so that the remaining
+ * attribute list keeps its usual grammar. The expression is also kept as raw
+ * text: the background worker rebuilds the prompt from it long after the
+ * statement itself is gone. */
+ai_column_attribute:
+AI COLUMN '(' expr ')' opt_ai_column_with
+{
+  ParseNode *text_node = NULL;
+  malloc_terminal_node(text_node, result->malloc_pool_, T_VARCHAR);
+  dup_expr_string(text_node, result, @4.first_column, @4.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_ATTR, 3, $4, $6, text_node);
+}
+;
+
 opt_column_default_value_list:
 opt_column_default_value_list opt_column_default_value
 {
@@ -6332,6 +6361,7 @@ opt_column_default_value_list opt_column_default_value
 {
   $$ = $1;
 }
+;
 
 opt_column_default_value:
 DEFAULT now_or_signed_literal
@@ -6343,6 +6373,38 @@ DEFAULT now_or_signed_literal
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_CONSTR_DEFAULT, 1, $3);
   dup_expr_string($$, result, @3.first_column, @3.last_column);
+}
+;
+
+/* An AI column keeps the generating expression and its options next to the
+ * column definition. The option list is a plain link chain of name/value
+ * pairs so that the resolver walks it the same way for every option. */
+opt_ai_column_with:
+/*EMPTY*/
+{
+  $$ = NULL;
+}
+| WITH '(' ai_column_option_list ')'
+{
+  $$ = $3;
+}
+;
+
+ai_column_option_list:
+ai_column_option
+{
+  $$ = $1;
+}
+| ai_column_option_list ',' ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+ai_column_option:
+NAME_OB COMP_EQ expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
 }
 ;
 
@@ -14862,7 +14924,11 @@ alter_table_action
 ;
 
 alter_table_action:
-opt_set table_option_list_space_seperated
+RETRY AI COLUMN column_definition_ref opt_where
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_AI_COLUMN_RETRY, 2, $4, $5);
+}
+| opt_set table_option_list_space_seperated
 {
   (void)$1;
   merge_nodes($$, result, T_TABLE_OPTION_LIST, $2);
@@ -18110,6 +18176,7 @@ ACCOUNT
 |       RANK
 |       READ_ONLY
 |       RECOVER
+|       RETRY
 |       RECOVERY
 |       RECURSIVE
 |       RECYCLEBIN
