@@ -133,6 +133,37 @@ select tokenize('hello world abcdefghijklmnopqrstuvwxyz', 'space', '[{"output": 
 --error ER_NOT_SUPPORTED_YET
 select tokenize('hello world abcdefghijklmnopqrstuvwxyz', 'ik', '[{"output": "all"}, {"additional_args": [{"ngram_token_size": 6}, {"max_token_size": 10}]}]');
 
+# Repeated words must retain their frequencies when the fast path finds a
+# previously inserted key. The English case also exercises stopword filtering.
+--disable_query_log
+--disable_result_log
+let $beng_freq = query_get_value(SELECT JSON_EXTRACT(tokenize('database DATABASE the', 'beng', '[{"output":"all"}]'), '$.tokens[0].database') AS freq, freq, 1);
+if ($beng_freq != 2)
+{
+  die BENG duplicate word frequency changed;
+}
+let $beng_length = query_get_value(SELECT JSON_EXTRACT(tokenize('database DATABASE the', 'beng', '[{"output":"all"}]'), '$.doc_len') AS len, len, 1);
+if ($beng_length != 2)
+{
+  die BENG stopword filtering changed;
+}
+let $ik_freq = query_get_value(SELECT JSON_EXTRACT(tokenize('ABC abc', 'ik', '[{"output":"all"}]'), '$.tokens[0].abc') AS freq, freq, 1);
+if ($ik_freq != 2)
+{
+  die IK duplicate word frequency changed;
+}
+create table fts_word_fast_path (id int primary key, body text,
+  fulltext index body_idx(body) with parser beng);
+insert into fts_word_fast_path values (1, 'database DATABASE the'), (2, 'unrelated terms');
+let $match_hits = query_get_value(SELECT COUNT(*) AS hits FROM fts_word_fast_path WHERE MATCH(body) AGAINST('database'), hits, 1);
+if ($match_hits != 1)
+{
+  die BENG MATCH results changed;
+}
+drop table fts_word_fast_path;
+--enable_result_log
+--enable_query_log
+
 
 --disable_warnings
 drop table if exists memo;
