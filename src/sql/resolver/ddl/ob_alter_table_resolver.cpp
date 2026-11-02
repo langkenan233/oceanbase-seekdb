@@ -344,6 +344,500 @@ int ObAlterTableResolver::check_alter_column_schemas_valid(ObAlterTableStmt &stm
   return ret;
 }
 
+namespace {
+
+int ai_retry_append_ident(ObSqlString &sql, const char *ptr, const int64_t len)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(ptr) || len <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(sql.append("`", 1))) {
+  } else if (OB_FAIL(sql.append(ptr, len))) {
+  } else if (OB_FAIL(sql.append("`", 1))) {
+  }
+  return ret;
+}
+
+int ai_retry_append_string(ObSqlString &sql, const char *ptr, const int64_t len)
+{
+  int ret = OB_SUCCESS;
+  if (OB_FAIL(sql.append("'", 1))) {
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < len; ++i) {
+    if ('\'' == ptr[i] || '\\' == ptr[i]) {
+      ret = sql.append("\\", 1);
+    }
+    if (OB_SUCC(ret)) {
+      ret = sql.append(ptr + i, 1);
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ret = sql.append("'", 1);
+  }
+  return ret;
+}
+
+bool ai_retry_name_is_status(const ParseNode &node)
+{
+  const char *expected = "status";
+  bool equal = OB_NOT_NULL(node.str_value_) && 6 == node.str_len_;
+  for (int64_t i = 0; equal && i < 6; ++i) {
+    char c = node.str_value_[i];
+    if (c >= 'A' && c <= 'Z') {
+      c = static_cast<char>(c - 'A' + 'a');
+    }
+    equal = (c == expected[i]);
+  }
+  return equal;
+}
+
+// A retry predicate is applied by an ordinary update, so the parse tree has to
+// be spelled out again. Only the shapes a row filter can be built from are
+// accepted; anything else is refused instead of being applied half way.
+class ObAiRetryPredicatePrinter
+{
+public:
+  ObAiRetryPredicatePrinter(ObSqlString &sql,
+                            const share::schema::ObColumnSchemaV2 &ai_column)
+      : sql_(sql), ai_column_(ai_column) {}
+  ~ObAiRetryPredicatePrinter() {}
+  int print(const ParseNode *node);
+private:
+  int print_binary(const ParseNode &node, const char *op);
+  int print_column_ref(const ParseNode &node);
+  int print_value(const ParseNode &node);
+  ObSqlString &sql_;
+  const share::schema::ObColumnSchemaV2 &ai_column_;
+};
+
+int ObAiRetryPredicatePrinter::print_binary(const ParseNode &node, const char *op)
+{
+  int ret = OB_SUCCESS;
+  if (OB_UNLIKELY(2 != node.num_child_) || OB_ISNULL(node.children_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(sql_.append("(", 1))) {
+  } else if (OB_FAIL(print(node.children_[0]))) {
+  } else if (OB_FAIL(sql_.append(op))) {
+  } else if (OB_FAIL(print(node.children_[1]))) {
+  } else if (OB_FAIL(sql_.append(")", 1))) {
+  }
+  return ret;
+}
+
+int ObAiRetryPredicatePrinter::print_column_ref(const ParseNode &node)
+{
+  int ret = OB_SUCCESS;
+  const ParseNode *db_node = NULL;
+  const ParseNode *tb_node = NULL;
+  const ParseNode *col_node = NULL;
+  if (OB_UNLIKELY(3 != node.num_child_) || OB_ISNULL(node.children_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(col_node = node.children_[2]) || OB_ISNULL(col_node->str_value_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    db_node = node.children_[0];
+    tb_node = node.children_[1];
+    if (0 == col_node->is_input_quoted_ && ai_retry_name_is_status(*col_node)) {
+      // STATUS is the retry only pseudo column: it reports whether the row
+      // already carries a result. A backticked name still means the column the
+      // table really has, so the shape of the reference decides.
+      const ObString &ai_name = ai_column_.get_column_name_str();
+      if (OB_FAIL(sql_.append_fmt("(IF(`%.*s` IS NULL, 'FAILED', 'READY'))",
+                                  ai_name.length(), ai_name.ptr()))) {
+      }
+    } else if (NULL != db_node
+               && OB_FAIL(ai_retry_append_ident(sql_, db_node->str_value_, db_node->str_len_))) {
+    } else if (NULL != db_node && OB_FAIL(sql_.append(".", 1))) {
+    } else if (NULL != tb_node
+               && OB_FAIL(ai_retry_append_ident(sql_, tb_node->str_value_, tb_node->str_len_))) {
+    } else if (NULL != tb_node && OB_FAIL(sql_.append(".", 1))) {
+    } else if (OB_FAIL(ai_retry_append_ident(sql_, col_node->str_value_, col_node->str_len_))) {
+    }
+  }
+  return ret;
+}
+
+int ObAiRetryPredicatePrinter::print_value(const ParseNode &node)
+{
+  int ret = OB_SUCCESS;
+  if (T_INT == node.type_) {
+    if (node.is_neg_ && node.value_ >= 0) {
+      ret = sql_.append_fmt("-%ld", node.value_);
+    } else {
+      ret = sql_.append_fmt("%ld", node.value_);
+    }
+  } else if (T_NUMBER == node.type_ || T_UNUMBER == node.type_) {
+    if (OB_ISNULL(node.str_value_) || node.str_len_ <= 0) {
+      ret = OB_NOT_SUPPORTED;
+    } else {
+      ret = sql_.append(node.str_value_, node.str_len_);
+    }
+  } else if (T_VARCHAR == node.type_ || T_CHAR == node.type_
+             || T_BINARY == node.type_) {
+    if (OB_ISNULL(node.str_value_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ret = ai_retry_append_string(sql_, node.str_value_, node.str_len_);
+    }
+  } else if (T_NULL == node.type_ || T_DEFAULT_NULL == node.type_) {
+    ret = sql_.append("NULL");
+  } else if (T_BOOL == node.type_) {
+    ret = sql_.append(0 == node.value_ ? "FALSE" : "TRUE");
+  } else {
+    ret = OB_NOT_SUPPORTED;
+  }
+  return ret;
+}
+
+int ObAiRetryPredicatePrinter::print(const ParseNode *node)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(node)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    switch (node->type_) {
+      case T_OP_AND:
+      case T_OP_OR: {
+        const char *op = (T_OP_AND == node->type_) ? " AND " : " OR ";
+        if (OB_UNLIKELY(node->num_child_ <= 0) || OB_ISNULL(node->children_)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(sql_.append("(", 1))) {
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < node->num_child_; ++i) {
+          if (i > 0 && OB_FAIL(sql_.append(op))) {
+          } else if (OB_FAIL(print(node->children_[i]))) {
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ret = sql_.append(")", 1);
+        }
+        break;
+      }
+      case T_OP_EQ: {
+        ret = print_binary(*node, " = ");
+        break;
+      }
+      case T_OP_NSEQ: {
+        ret = print_binary(*node, " <=> ");
+        break;
+      }
+      case T_OP_NE: {
+        ret = print_binary(*node, " != ");
+        break;
+      }
+      case T_OP_LT: {
+        ret = print_binary(*node, " < ");
+        break;
+      }
+      case T_OP_LE: {
+        ret = print_binary(*node, " <= ");
+        break;
+      }
+      case T_OP_GT: {
+        ret = print_binary(*node, " > ");
+        break;
+      }
+      case T_OP_GE: {
+        ret = print_binary(*node, " >= ");
+        break;
+      }
+      case T_OP_LIKE: {
+        ret = print_binary(*node, " LIKE ");
+        break;
+      }
+      case T_OP_NOT_LIKE: {
+        ret = print_binary(*node, " NOT LIKE ");
+        break;
+      }
+      case T_OP_ADD: {
+        ret = print_binary(*node, " + ");
+        break;
+      }
+      case T_OP_MINUS: {
+        ret = print_binary(*node, " - ");
+        break;
+      }
+      case T_OP_MUL: {
+        ret = print_binary(*node, " * ");
+        break;
+      }
+      case T_OP_DIV: {
+        ret = print_binary(*node, " / ");
+        break;
+      }
+      case T_OP_MOD:
+      case T_OP_REM: {
+        ret = print_binary(*node, " % ");
+        break;
+      }
+      case T_OP_NOT: {
+        if (OB_UNLIKELY(1 != node->num_child_) || OB_ISNULL(node->children_)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(sql_.append("(NOT ", 5))) {
+        } else if (OB_FAIL(print(node->children_[0]))) {
+        } else {
+          ret = sql_.append(")", 1);
+        }
+        break;
+      }
+      case T_OP_IS:
+      case T_OP_IS_NOT: {
+        const ParseNode *right = NULL;
+        if (OB_UNLIKELY(2 != node->num_child_) || OB_ISNULL(node->children_)
+            || OB_ISNULL(right = node->children_[1])) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (T_NULL != right->type_ && T_DEFAULT_NULL != right->type_) {
+          ret = OB_NOT_SUPPORTED;
+        } else if (OB_FAIL(sql_.append("(", 1))) {
+        } else if (OB_FAIL(print(node->children_[0]))) {
+        } else if (OB_FAIL(sql_.append(T_OP_IS == node->type_ ? " IS NULL)" : " IS NOT NULL)"))) {
+        }
+        break;
+      }
+      case T_OP_IN:
+      case T_OP_NOT_IN: {
+        const ParseNode *list = NULL;
+        if (OB_UNLIKELY(2 != node->num_child_) || OB_ISNULL(node->children_)
+            || OB_ISNULL(list = node->children_[1])) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (T_EXPR_LIST != list->type_ || OB_ISNULL(list->children_)) {
+          ret = OB_NOT_SUPPORTED;
+        } else if (OB_FAIL(sql_.append("(", 1))) {
+        } else if (OB_FAIL(print(node->children_[0]))) {
+        } else if (OB_FAIL(sql_.append(T_OP_IN == node->type_ ? " IN (" : " NOT IN ("))) {
+        }
+        for (int64_t i = 0; OB_SUCC(ret) && i < list->num_child_; ++i) {
+          if (i > 0 && OB_FAIL(sql_.append(", "))) {
+          } else if (OB_FAIL(print(list->children_[i]))) {
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ret = sql_.append("))", 2);
+        }
+        break;
+      }
+      case T_OP_BTW:
+      case T_OP_NOT_BTW: {
+        if (OB_UNLIKELY(3 != node->num_child_) || OB_ISNULL(node->children_)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(sql_.append("(", 1))) {
+        } else if (OB_FAIL(print(node->children_[0]))) {
+        } else if (OB_FAIL(sql_.append(T_OP_BTW == node->type_ ? " BETWEEN " : " NOT BETWEEN "))) {
+        } else if (OB_FAIL(print(node->children_[1]))) {
+        } else if (OB_FAIL(sql_.append(" AND "))) {
+        } else if (OB_FAIL(print(node->children_[2]))) {
+        } else {
+          ret = sql_.append(")", 1);
+        }
+        break;
+      }
+      case T_OP_NEG:
+      case T_OP_POS: {
+        if (OB_UNLIKELY(1 != node->num_child_) || OB_ISNULL(node->children_)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(sql_.append(T_OP_NEG == node->type_ ? "(-" : "(+", 2))) {
+        } else if (OB_FAIL(print(node->children_[0]))) {
+        } else {
+          ret = sql_.append(")", 1);
+        }
+        break;
+      }
+      case T_COLUMN_REF: {
+        ret = print_column_ref(*node);
+        break;
+      }
+      case T_INT:
+      case T_NUMBER:
+      case T_UNUMBER:
+      case T_VARCHAR:
+      case T_CHAR:
+      case T_BINARY:
+      case T_NULL:
+      case T_DEFAULT_NULL:
+      case T_BOOL: {
+        ret = print_value(*node);
+        break;
+      }
+      case T_FUN_SYS: {
+        const ParseNode *name_node = NULL;
+        const ParseNode *args = NULL;
+        if (OB_UNLIKELY(2 != node->num_child_) || OB_ISNULL(node->children_)
+            || OB_ISNULL(name_node = node->children_[0])
+            || OB_ISNULL(name_node->str_value_)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(sql_.append(name_node->str_value_, name_node->str_len_))) {
+        } else if (OB_FAIL(sql_.append("(", 1))) {
+        } else if (OB_NOT_NULL(args = node->children_[1]) && T_EXPR_LIST == args->type_) {
+          for (int64_t i = 0; OB_SUCC(ret) && i < args->num_child_; ++i) {
+            if (i > 0 && OB_FAIL(sql_.append(", "))) {
+            } else if (OB_FAIL(print(args->children_[i]))) {
+            }
+          }
+        }
+        if (OB_SUCC(ret)) {
+          ret = sql_.append(")", 1);
+        }
+        break;
+      }
+      default: {
+        ret = OB_NOT_SUPPORTED;
+        break;
+      }
+    }
+    if (OB_NOT_SUPPORTED == ret) {
+      SQL_RESV_LOG(WARN, "ai column retry predicate node is not supported", K(node->type_));
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "this AI COLUMN RETRY predicate");
+    }
+  }
+  return ret;
+}
+
+}  // namespace
+
+int ObAlterTableResolver::resolve_ai_column_retry(const ParseNode &node)
+{
+  int ret = OB_SUCCESS;
+  ObAlterTableStmt *alter_table_stmt = get_alter_table_stmt();
+  const ParseNode *column_node = NULL;
+  const ParseNode *where_node = NULL;
+  const ObColumnSchemaV2 *ai_column = NULL;
+  const ObDatabaseSchema *db_schema = NULL;
+  const ObColumnSchemaV2 *pk_column = NULL;
+  ObSEArray<uint64_t, 1> rowkey_ids;
+  ObString column_name;
+  ObSqlString sql;
+  char request_buf[64];
+  int64_t request_len = 0;
+  char request_column[OB_MAX_COLUMN_NAME_LENGTH];
+  int64_t request_column_len = 0;
+  if (OB_ISNULL(alter_table_stmt) || OB_ISNULL(table_schema_)
+      || OB_ISNULL(session_info_) || OB_ISNULL(schema_checker_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid alter table resolver state", K(ret));
+  } else if (OB_UNLIKELY(2 != node.num_child_) || OB_ISNULL(node.children_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai column retry parse tree", K(ret), K(node.num_child_));
+  } else if (OB_ISNULL(column_node = node.children_[0])
+             || OB_UNLIKELY(T_COLUMN_REF != column_node->type_)
+             || OB_UNLIKELY(3 != column_node->num_child_)
+             || OB_ISNULL(column_node->children_)
+             || OB_ISNULL(column_node->children_[2])
+             || OB_ISNULL(column_node->children_[2]->str_value_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "ai column retry has no target column", K(ret));
+  } else {
+    const ParseNode *name_node = column_node->children_[2];
+    column_name.assign_ptr(name_node->str_value_, static_cast<int32_t>(name_node->str_len_));
+    where_node = node.children_[1];
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_ISNULL(ai_column = table_schema_->get_column_schema(column_name))
+             || !ai_column->is_ai_column()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying a column that is not an AI column");
+  } else if (1 != table_schema_->get_rowkey_column_num()) {
+    // The worker locates a row again from one equality, which a composite key
+    // cannot express.
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "retrying an AI column of a table keyed by more than one column");
+  } else if (OB_FAIL(table_schema_->get_rowkey_column_ids(rowkey_ids)) || rowkey_ids.empty()) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "get row key column ids failed", K(ret));
+  } else if (OB_ISNULL(pk_column = table_schema_->get_column_schema(rowkey_ids.at(0)))) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "primary key column is missing", K(ret));
+  } else if (OB_FAIL(schema_checker_->get_database_schema(table_schema_->get_database_id(),
+                                                          db_schema))
+             || OB_ISNULL(db_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "database of the table is missing", K(ret));
+  } else if (OB_FAIL(databuff_printf(request_buf,
+                                     sizeof(request_buf),
+                                     request_len,
+                                     "ai%ld",
+                                     ObTimeUtility::current_time()))) {
+    SQL_RESV_LOG(WARN, "build ai column request id failed", K(ret));
+  } else if (OB_FAIL(databuff_printf(request_column,
+                                     sizeof(request_column),
+                                     request_column_len,
+                                     "__ai_request_%.*s",
+                                     ai_column->get_column_name_str().length(),
+                                     ai_column->get_column_name_str().ptr()))) {
+    SQL_RESV_LOG(WARN, "build ai column request column name failed", K(ret));
+  }
+  // The selected rows drop their result and take a new request id, then the
+  // queue of the column is rebuilt from the rows that have no result left. The
+  // statements run in this order and without a transaction of their own: the
+  // rows a predicate picks are not part of the statement that follows them.
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(sql.append_fmt("UPDATE `%.*s`.`%.*s` SET `%.*s` = NULL, `%.*s` = '%.*s' WHERE ",
+                                    db_schema->get_database_name_str().length(),
+                                    db_schema->get_database_name_str().ptr(),
+                                    table_schema_->get_table_name_str().length(),
+                                    table_schema_->get_table_name_str().ptr(),
+                                    ai_column->get_column_name_str().length(),
+                                    ai_column->get_column_name_str().ptr(),
+                                    request_column_len, request_column,
+                                    request_len, request_buf))) {
+    SQL_RESV_LOG(WARN, "append ai column retry update failed", K(ret));
+  } else if (NULL == where_node) {
+    if (OB_FAIL(sql.append("1 = 1"))) {
+      SQL_RESV_LOG(WARN, "append ai column retry condition failed", K(ret));
+    }
+  } else if (OB_UNLIKELY(T_WHERE_CLAUSE != where_node->type_)
+             || OB_UNLIKELY(where_node->num_child_ < 1)
+             || OB_ISNULL(where_node->children_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai column retry predicate", K(ret));
+  } else {
+    ObAiRetryPredicatePrinter printer(sql, *ai_column);
+    if (OB_FAIL(printer.print(where_node->children_[0]))) {
+      SQL_RESV_LOG(WARN, "print ai column retry predicate failed", K(ret));
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (OB_FAIL(sql.append(";"))) {
+  } else if (OB_FAIL(sql.append_fmt("DELETE FROM oceanbase.__all_ai_column_task"
+                                    " WHERE table_id = %lu AND column_id = %lu;",
+                                    table_schema_->get_table_id(),
+                                    ai_column->get_column_id()))) {
+    SQL_RESV_LOG(WARN, "append ai column task cleanup failed", K(ret));
+  } else if (OB_FAIL(sql.append_fmt("REPLACE INTO oceanbase.__all_ai_column_task"
+                                    "(table_id, column_id, task_id, request_id,"
+                                    " def_version, state, retry_count, rowkey_predicate,"
+                                    " eligible_ts) SELECT %lu, %lu, CONCAT('`%.*s` = ', `%.*s`),"
+                                    " `%.*s`, 0, 0, 0, CONCAT('`%.*s` = ', `%.*s`), NOW(6)"
+                                    " FROM `%.*s`.`%.*s` WHERE (`%.*s` IS NULL);",
+                                    table_schema_->get_table_id(),
+                                    ai_column->get_column_id(),
+                                    pk_column->get_column_name_str().length(),
+                                    pk_column->get_column_name_str().ptr(),
+                                    pk_column->get_column_name_str().length(),
+                                    pk_column->get_column_name_str().ptr(),
+                                    request_column_len, request_column,
+                                    pk_column->get_column_name_str().length(),
+                                    pk_column->get_column_name_str().ptr(),
+                                    pk_column->get_column_name_str().length(),
+                                    pk_column->get_column_name_str().ptr(),
+                                    db_schema->get_database_name_str().length(),
+                                    db_schema->get_database_name_str().ptr(),
+                                    table_schema_->get_table_name_str().length(),
+                                    table_schema_->get_table_name_str().ptr(),
+                                    ai_column->get_column_name_str().length(),
+                                    ai_column->get_column_name_str().ptr()))) {
+    SQL_RESV_LOG(WARN, "append ai column task rebuild failed", K(ret));
+  } else {
+    session_info_->reset_ai_dml_sql();
+    if (OB_FAIL(session_info_->get_ai_dml_post_sql().assign(sql))) {
+      SQL_RESV_LOG(WARN, "store ai column retry statement failed", K(ret));
+    } else {
+      alter_table_stmt->set_is_ai_column_retry(true);
+      SQL_RESV_LOG(INFO, "ai column retry prepared", K(sql));
+    }
+  }
+  return ret;
+}
+
 int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
 {
   int ret = OB_SUCCESS;
@@ -401,6 +895,17 @@ int ObAlterTableResolver::resolve_action_list(const ParseNode &node)
       } else if (FALSE_IT(alter_table_stmt->inc_alter_table_action_count())) {
       } else {
         switch (action_node->type_) {
+        // A retry is carried by the statement text and changes no schema, so it
+        // stands alone in the action list.
+        case T_ALTER_AI_COLUMN_RETRY: {
+            if (OB_UNLIKELY(1 != node.num_child_)) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED,
+                             "combining AI COLUMN RETRY with another ALTER action");
+            } else if (OB_FAIL(resolve_ai_column_retry(*action_node))) {
+            }
+            break;
+          }
         //deal with alter table option
         case T_ALTER_TABLE_OPTION: {
             alter_table_stmt->set_alter_table_option();

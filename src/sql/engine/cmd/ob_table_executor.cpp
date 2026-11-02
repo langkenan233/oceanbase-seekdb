@@ -42,6 +42,10 @@
 
 #include "sql/printer/ob_select_stmt_printer.h"
 #include "share/ob_structured_event_logger.h"
+#include "common/mysqlclient/ob_mysql_transaction.h"
+#include "common/mysqlclient/ob_isql_connection.h"
+#include "lib/string/ob_sql_string.h"
+#include "sql/session/ob_inner_sql_connection.h"
 namespace oceanbase
 {
 using namespace common;
@@ -751,6 +755,92 @@ int ObAlterTableExecutor::alter_table_exchange_partition_rpc(obcall::ObExchangeP
   return ret;
 }
 
+// A retry of one AI column only rewrites rows and the queue of that column, so
+// the statement that the resolver prepared is run here instead of a schema
+// change.
+int ObAlterTableExecutor::execute_ai_column_retry(ObExecContext &ctx)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = NULL;
+  ObIInnerSQLConnection *conn = NULL;
+  sqlclient::ObISQLConnectionGuard conn_guard;
+  ObSqlString script;
+  bool opened_here = false;
+  bool saved_access = false;
+  if (OB_ISNULL(session = ctx.get_my_session())) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("ai column retry has no session", K(ret));
+  } else if (OB_FAIL(script.assign(session->get_ai_dml_post_sql()))) {
+    LOG_WARN("copy ai column retry statement failed", K(ret));
+  } else {
+    session->reset_ai_dml_sql();
+    if (script.length() <= 0) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("ai column retry statement is empty", K(ret));
+    } else if (NULL != session->get_inner_conn()) {
+      conn = as_inner_sql_connection(session->get_inner_conn());
+    } else if (OB_FAIL(query::ObInnerSQLConnectionAccess::create_connection_with_external_session(
+                   session, conn_guard))) {
+      LOG_WARN("create ai column retry connection failed", K(ret));
+    } else if (OB_ISNULL(conn = as_inner_sql_connection(conn_guard.get_ptr()))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      session->set_inner_conn(conn_guard.get_ptr());
+      opened_here = true;
+    }
+    if (OB_FAIL(ret)) {
+    } else if (OB_ISNULL(conn)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      // The statements name the hidden companion column of the AI column, which
+      // only the statements of this machinery are allowed to see.
+      saved_access = session->is_ai_column_access();
+      session->set_ai_column_access(true);
+      // The text is cut on the separators outside literals and identifiers, so
+      // a value that carries one stays whole.
+      const char *text = script.ptr();
+      const int64_t length = script.length();
+      int64_t start = 0;
+      bool in_string = false;
+      bool in_ident = false;
+      for (int64_t i = 0; OB_SUCC(ret) && i <= length; ++i) {
+        const char c = (i < length) ? text[i] : '\0';
+        if (in_string) {
+          if ('\\' == c) {
+            ++i;
+          } else if ('\'' == c) {
+            in_string = false;
+          }
+        } else if (in_ident) {
+          if ('`' == c) {
+            in_ident = false;
+          }
+        } else if ('\'' == c) {
+          in_string = true;
+        } else if ('`' == c) {
+          in_ident = true;
+        } else if (';' == c || '\0' == c) {
+          if (i > start) {
+            const ObString piece(static_cast<int32_t>(i - start), text + start);
+            int64_t affected_rows = 0;
+            if (OB_FAIL(conn->execute_write(piece, affected_rows))) {
+              LOG_WARN("run ai column retry statement failed", K(ret), K(piece));
+            } else {
+              LOG_INFO("ai column retry statement done", K(piece), K(affected_rows));
+            }
+          }
+          start = i + 1;
+        }
+      }
+      session->set_ai_column_access(saved_access);
+    }
+    if (opened_here) {
+      session->set_inner_conn(NULL);
+    }
+  }
+  return ret;
+}
+
 int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
 {
   int ret = OB_SUCCESS;
@@ -762,6 +852,10 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
   OV (OB_NOT_NULL(task_exec_ctx = GET_SQL_EXECUTOR_CTX(ctx)), OB_NOT_INIT);
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (stmt.is_ai_column_retry()) {
+    if (OB_FAIL(execute_ai_column_retry(ctx))) {
+      LOG_WARN("execute ai column retry failed", K(ret));
+    }
   } else if (stmt.is_alter_triggers()) {
     if (stmt.get_tg_arg().trigger_infos_.count() > 0) {
       stmt.get_tg_arg().ddl_stmt_str_ = first_stmt;

@@ -1855,6 +1855,11 @@ private:
   // There are differences between the two in terms of ASH statistics and so on, so they should be distinguished.
 public:
   int8_t get_min_const_integer_precision() const;
+  // The rule that rejects a read of an AI column that still has unfinished tasks.
+  int get_ai_column_strict_read(int64_t &int64_val) const
+  {
+    return get_int64_sys_var(share::SYS_VAR_AI_COLUMN_STRICT_READ, int64_val);
+  }
 };
 
 

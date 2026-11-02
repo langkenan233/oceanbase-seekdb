@@ -51,6 +51,11 @@ public:
   bool is_alter_system() const { return is_alter_system_; }
   void set_is_alter_system(const bool flag) { is_alter_system_ = flag; }
 
+  // A retry of one AI column is carried by the statement text instead of a
+  // schema change, so the executor runs that text and skips the DDL request.
+  bool is_ai_column_retry() const { return is_ai_column_retry_; }
+  void set_is_ai_column_retry(const bool flag) { is_ai_column_retry_ = flag; }
+
   bool is_alter_triggers() const { return is_alter_triggers_; }
   void set_is_alter_triggers(const bool flag) { is_alter_triggers_ = flag; }
 
@@ -108,6 +113,7 @@ private:
   obcall::ObAlterTableArg alter_table_arg_;
   bool is_comment_table_;
   bool is_alter_system_;
+  bool is_ai_column_retry_ = false;
   common::ObSArray<obcall::ObCreateIndexArg*> index_arg_list_;
   common::ObIAllocator *fts_arg_allocator_;
   bool is_alter_triggers_;

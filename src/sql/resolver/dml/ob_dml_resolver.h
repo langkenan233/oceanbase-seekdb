@@ -378,6 +378,11 @@ protected:
                                 bool include_hidden,
                                 ColumnItem *&col_item,
                                 ObDMLStmt *stmt = NULL);
+  int check_ai_column_strict_read(const TableItem &table_item,
+                                  const share::schema::ObColumnSchemaV2 &col_schema);
+  // The statements the AI column machinery runs on its own behalf name the
+  // column they fill in, which the session wide read rule must not reject.
+  void set_ai_column_write_suppress(const bool suppress) { ai_write_suppress_ = suppress; }
   int adjust_values_desc_position(ObInsertTableInfo& table_info,
                                   ObIArray<int64_t> &value_idxs);
 public:
@@ -902,6 +907,7 @@ protected:
 
   //for values table used to insert stmt:insert into table values row()....
   ObInsertResolver *upper_insert_resolver_;
+  bool ai_write_suppress_ = false;
 protected:
   DISALLOW_COPY_AND_ASSIGN(ObDMLResolver);
 };

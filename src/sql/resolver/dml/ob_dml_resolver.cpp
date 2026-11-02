@@ -42,6 +42,10 @@
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
 #include "sql/engine/basic/ob_file_scan_utils.h"
+#include "common/mysqlclient/ob_mysql_transaction.h"
+#include "common/mysqlclient/ob_isql_connection.h"
+#include "share/ob_server_struct.h"
+#include "lib/string/ob_sql_string.h"
 
 namespace oceanbase
 {
@@ -1889,6 +1893,7 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
     } else if (OB_FAIL(get_column_schema(tid, column_name, col_schema, include_hidden))) {
     } else if (OB_ISNULL(col_schema)) {
       ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(check_ai_column_strict_read(table_item, *col_schema))) {
     } else if (OB_FAIL(ObRawExprUtils::build_column_expr(*params_.expr_factory_, *col_schema, session_info_, col_expr))) {
     } else if (OB_FAIL(table_schema->is_unique_key_column(*schema_guard,
                                                           col_schema->get_column_id(),
@@ -13338,6 +13343,108 @@ static int build_ai_hidden_column_name(const char *prefix,
     MEMCPY(buf, prefix, prefix_len);
     MEMCPY(buf + prefix_len, column_name.ptr(), column_name.length());
     len = prefix_len + column_name.length();
+  }
+  return ret;
+}
+
+namespace {
+
+// A strict read only has to know whether some row of the column still waits for
+// a result, which a row without a value answers: the column is unfinished until
+// every row carries one. The probe runs while this statement is being resolved,
+// so a nested probe of its own statement is not started again.
+int ai_column_has_unfinished_row(const ObString &db_name,
+                                 const ObString &table_name,
+                                 const ObString &column_name,
+                                 bool &unfinished)
+{
+  int ret = OB_SUCCESS;
+  static thread_local bool probing = false;
+  ObSqlString sql;
+  sqlclient::ObISQLConnectionGuard conn_guard;
+  sqlclient::ObISQLConnection *conn = NULL;
+  unfinished = false;
+  if (probing) {
+    // the statement that answers the question is not the one being asked about
+  } else if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(sql.append_fmt("SELECT 1 FROM `%.*s`.`%.*s`"
+                                    " WHERE `%.*s` IS NULL LIMIT 1",
+                                    db_name.length(), db_name.ptr(),
+                                    table_name.length(), table_name.ptr(),
+                                    column_name.length(), column_name.ptr()))) {
+    SQL_RESV_LOG(WARN, "build ai column strict read probe failed", K(ret));
+  } else if (OB_FAIL(GCTX.sql_proxy_->acquire_connection(conn_guard, 0))) {
+    SQL_RESV_LOG(WARN, "acquire ai column read connection failed", K(ret));
+  } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    probing = true;
+    SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+      sqlclient::ObMySQLResult *result = NULL;
+      if (OB_FAIL(conn->execute_read(
+                      ObString(static_cast<int32_t>(sql.length()), sql.ptr()), res))) {
+        SQL_RESV_LOG(WARN, "probe ai column row failed", K(ret), K(sql));
+      } else if (NULL == (result = res.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const int tmp_ret = result->next();
+        if (OB_SUCCESS == tmp_ret) {
+          unfinished = true;
+        } else if (OB_ITER_END != tmp_ret) {
+          ret = tmp_ret;
+          SQL_RESV_LOG(WARN, "iterate ai column probe failed", K(ret));
+        }
+      }
+    }
+    probing = false;
+  }
+  return ret;
+}
+
+}  // namespace
+
+int ObDMLResolver::check_ai_column_strict_read(
+    const TableItem &table_item,
+    const share::schema::ObColumnSchemaV2 &col_schema)
+{
+  int ret = OB_SUCCESS;
+  int64_t strict = 0;
+  bool unfinished = false;
+  ObDMLStmt *stmt = get_stmt();
+  const ObTableSchema *table_schema = NULL;
+  ObString db_name;
+  if (OB_ISNULL(session_info_) || OB_ISNULL(stmt) || OB_ISNULL(schema_checker_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (!col_schema.is_ai_column()
+             || ai_write_suppress_
+             || session_info_->is_ai_column_access()) {
+    // Filling a column in is not reading it.
+  } else if (stmt::T_INSERT == stmt->get_stmt_type()
+             || stmt::T_REPLACE == stmt->get_stmt_type()) {
+    // An insert is what puts work in the queue, so it may name the columns it
+    // starts.
+  } else if (OB_FAIL(session_info_->get_ai_column_strict_read(strict))) {
+    SQL_RESV_LOG(WARN, "read ai column strict read flag failed", K(ret));
+  } else if (0 == strict) {
+    // the session accepts a row that has no result yet
+  } else if (OB_FAIL(schema_checker_->get_table_schema(table_item.ref_id_, table_schema))
+             || OB_ISNULL(table_schema)) {
+    ret = COVER_SUCC(OB_ERR_UNEXPECTED);
+    SQL_RESV_LOG(WARN, "table schema of ai column is missing", K(ret));
+  } else if (FALSE_IT(db_name = table_item.database_name_.empty()
+                                 ? session_info_->get_database_name()
+                                 : table_item.database_name_)) {
+  } else if (OB_FAIL(ai_column_has_unfinished_row(db_name,
+                                                  table_schema->get_table_name_str(),
+                                                  col_schema.get_column_name_str(),
+                                                  unfinished))) {
+    SQL_RESV_LOG(WARN, "look up unfinished ai column row failed", K(ret));
+  } else if (unfinished) {
+    ret = OB_ERR_AI_COLUMN_NOT_READY;
+    LOG_USER_ERROR(OB_ERR_AI_COLUMN_NOT_READY,
+                   static_cast<int64_t>(table_item.ref_id_),
+                   static_cast<int64_t>(col_schema.get_column_id()));
   }
   return ret;
 }

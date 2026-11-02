@@ -627,6 +627,9 @@ int ObUpdateResolver::add_ai_column_assignment(ObTableAssignment &table_assign,
   ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
   ColumnItem *col_item = NULL;
   ObConstRawExpr *const_expr = NULL;
+  // Naming the column to fill it in is not the read that a strict session
+  // rejects.
+  set_ai_column_write_suppress(true);
   if (OB_ISNULL(params_.expr_factory_) || OB_ISNULL(get_update_stmt())) {
     ret = OB_NOT_INIT;
     SQL_RESV_LOG(WARN, "update resolver is not ready", K(ret));
@@ -687,6 +690,7 @@ int ObUpdateResolver::add_ai_column_assignment(ObTableAssignment &table_assign,
   } else if (OB_SUCC(ret) && OB_FAIL(table_assign.assignments_.push_back(assignment))) {
     SQL_RESV_LOG(WARN, "add ai column assignment failed", K(ret));
   }
+  set_ai_column_write_suppress(false);
   return ret;
 }
 

@@ -65,6 +65,7 @@ public:
   int resolve_constraint_options(const ParseNode &node, const bool is_multi_actions);
   int resolve_modify_check_constraint_state_mysql(const ParseNode* node);
   int resolve_convert_to_character(const ParseNode &node);
+  int resolve_ai_column_retry(const ParseNode &node);
   int resolve_foreign_key_options(const ParseNode &node);
   int resolve_add_column(const ParseNode &node, ObColumnNameSet &resolve_add_column);
   int gen_ai_hidden_alter_columns(const share::schema::AlterColumnSchema &ai_column,
