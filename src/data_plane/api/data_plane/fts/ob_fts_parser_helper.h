@@ -162,6 +162,15 @@ public:
       const common::ObString &parser_name,
       const common::ObString &parser_properties);
   /**
+   * Same as above, but takes an already resolved parser property so that the
+   * caller which owns the property pays neither a serialization nor a
+   * deserialization round trip per document.
+   */
+  int init(
+      common::ObIAllocator *allocator,
+      const common::ObString &parser_name,
+      const ObFTParserProperty &parser_property);
+  /**
    * Split document into multiple words
    *
    * @param[in] type, collation type for fulltext

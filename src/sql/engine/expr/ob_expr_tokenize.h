@@ -62,8 +62,9 @@ private:
 
     int parse_json_param(const ObIJsonBase *obj);
 
-    // check and reform parser properties to standard format
-    int reform_parser_properties(const ObString &properties);
+    // resolve the parser configuration once, the result is reused for every
+    // document of this evaluation instead of being round tripped through JSON
+    int build_parser_property();
     int try_load_dictionary_for_ik();
 
   public:
@@ -71,6 +72,7 @@ private:
     mutable ObArenaAllocator allocator_;
     ObString parser_name_;
     ObString properties_;
+    storage::ObFTParserProperty property_;
     ObObjMeta meta_;
     ObString fulltext_;
     enum OUTPUT_MODE
