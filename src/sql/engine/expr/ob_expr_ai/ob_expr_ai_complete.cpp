@@ -105,6 +105,9 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     ObString prompt;
     ObJsonObject *config = nullptr;
     ObString config_str;
+    // A typed instruction travels with the call, which is how an AI column asks
+    // for the shape its column needs.
+    ObString system_prompt;
     share::ObAiModelEndpointInfo resolved_endpoint;
     const share::ObAiModelEndpointInfo *endpoint_info = &resolved_endpoint;
     query::ObIAiEndpointResolver *endpoint_resolver =
@@ -133,6 +136,22 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     } else if (OB_NOT_NULL(arg_config) && !arg_config->is_null()) {
       if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_config, expr.args_[2]->datum_meta_, expr.args_[2]->obj_meta_.has_lob_header(), config_str))) {
       } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_object_form_str(temp_allocator, config_str, config))) {
+      } else if (OB_NOT_NULL(config)) {
+        ObJsonNode *prompt_node = config->get_value(ObString::make_string("system_prompt"));
+        if (NULL == prompt_node) {
+          // no instruction for this call
+        } else if (ObJsonNodeType::J_STRING != prompt_node->json_type()) {
+          ret = OB_INVALID_ARGUMENT;
+          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, system_prompt must be a string");
+          res.set_null();
+        } else {
+          system_prompt = static_cast<ObJsonString *>(prompt_node)->get_str();
+          // The instruction is ours, not a request parameter, so it is taken out
+          // before the config reaches the http body.
+          if (OB_FAIL(config->remove(ObString::make_string("system_prompt")))) {
+            LOG_WARN("failed to strip system prompt from config", K(ret));
+          }
+        }
       }
     }
 
@@ -152,7 +171,7 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     } else {
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
-      if (OB_FAIL(model.call_completion(prompt, config, result))) {
+      if (OB_FAIL(model.call_completion(prompt, config, result, system_prompt))) {
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
       }
     }

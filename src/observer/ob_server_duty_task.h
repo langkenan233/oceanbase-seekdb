@@ -17,6 +17,7 @@
 #ifndef OB_SERVER_DUTY_TASK_H
 #define OB_SERVER_DUTY_TASK_H
 #include <stdint.h>
+#include <pthread.h>
 #include "lib/task/ob_timer.h"
 #include "lib/allocator/page_arena.h"
 
@@ -48,6 +49,53 @@ private:
   void runTimerTask() override;
 private:
   static constexpr int64_t SCHEDULE_PERIOD = 3 * 1000L * 1000L;
+};
+
+// Fills in the AI columns that were left empty by a write. The DML itself only
+// queues the work, because a model call can take longer than the statement that
+// caused it is allowed to run.
+//
+// This runs on its own thread instead of a timer task: the timer service in this
+// build does not carry a worker pool, so queued timer tasks never run.
+class ObAiColumnWorkerTask
+{
+  static constexpr int64_t SLEEP_BETWEEN_ROUNDS = 20 * 1000L;
+  static constexpr int64_t MAX_TASKS_PER_ROUND = 32;
+public:
+  ObAiColumnWorkerTask();
+  ~ObAiColumnWorkerTask();
+  int start();
+  void stop();
+private:
+  // One queued column of one row. The rows that share a request id and a row
+  // predicate are computed together, so their results become visible at once.
+  struct AiTaskRow
+  {
+    uint64_t table_id_;
+    uint64_t column_id_;
+    int64_t retry_count_;
+    int64_t state_;
+    common::ObString task_id_;
+    common::ObString request_id_;
+    common::ObString predicate_;
+    common::ObString db_name_;
+    common::ObString table_name_;
+  };
+  static void *loop_entry(void *arg);
+  void loop();
+  int do_work();
+  int exec_write(const common::ObString &sql, int64_t &affected_rows);
+  int fetch_tasks(common::ObIAllocator &alloc, common::ObIArray<AiTaskRow> &rows);
+  int process_group(common::ObIAllocator &alloc, const common::ObIArray<AiTaskRow> &group);
+  int build_update_sql(common::ObIAllocator &alloc,
+                       const common::ObIArray<AiTaskRow> &group,
+                       common::ObSqlString &sql);
+  int finish_group(const common::ObIArray<AiTaskRow> &group);
+private:
+  pthread_t thread_;
+  bool started_;
+  volatile bool stop_;
+  int64_t tick_count_;
 };
 
 }  // observer

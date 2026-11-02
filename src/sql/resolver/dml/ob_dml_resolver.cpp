@@ -13387,18 +13387,30 @@ int build_ai_column_dml_sql(ObSQLSessionInfo &session,
                                                      request_column_len))) {
       } else {
         // The queue is rebuilt from the rows that still need a result, which
-        // also drops the task of a row whose key this statement rewrote.
+        // also drops the task of a row whose key this statement rewrote. The
+        // request id of a task is the one its row carries, so a row that waits
+        // for an older request keeps that request and its own result.
         const ObString &table_name = table_schema.get_table_name_str();
-        if (OB_FAIL(sql.append_fmt("DELETE FROM oceanbase.__all_ai_column_task"
-                                   " WHERE table_id = %lu AND column_id = %lu;",
-                                   table_schema.get_table_id(),
-                                   ai_column->get_column_id()))) {
+        if (OB_FAIL(sql.append_fmt("UPDATE `%.*s`.`%.*s` SET `%.*s` = '%.*s'"
+                                   " WHERE `%.*s` IS NULL AND `%.*s` IS NULL;",
+                                   db_name.length(), db_name.ptr(),
+                                   table_name.length(), table_name.ptr(),
+                                   request_column_len, request_column,
+                                   request_id.length(), request_id.ptr(),
+                                   request_column_len, request_column,
+                                   ai_column->get_column_name_str().length(),
+                                   ai_column->get_column_name_str().ptr()))) {
+          SQL_RESV_LOG(WARN, "append ai column request stamp failed", K(ret));
+        } else if (OB_FAIL(sql.append_fmt("DELETE FROM oceanbase.__all_ai_column_task"
+                                          " WHERE table_id = %lu AND column_id = %lu;",
+                                          table_schema.get_table_id(),
+                                          ai_column->get_column_id()))) {
           SQL_RESV_LOG(WARN, "append ai column task cleanup failed", K(ret));
         } else if (OB_FAIL(sql.append_fmt("REPLACE INTO oceanbase.__all_ai_column_task"
                                           "(table_id, column_id, task_id, request_id,"
                                           " def_version, state, retry_count, rowkey_predicate,"
                                           " eligible_ts) SELECT %lu, %lu, CONCAT('`%.*s` = ', `%.*s`),"
-                                          " '%.*s', 0, 0, 0, CONCAT('`%.*s` = ', `%.*s`), NOW(6)"
+                                          " `%.*s`, 0, 0, 0, CONCAT('`%.*s` = ', `%.*s`), NOW(6)"
                                           " FROM `%.*s`.`%.*s` WHERE (`%.*s` IS NULL);",
                                           table_schema.get_table_id(),
                                           ai_column->get_column_id(),
@@ -13406,7 +13418,7 @@ int build_ai_column_dml_sql(ObSQLSessionInfo &session,
                                           pk_column->get_column_name_str().ptr(),
                                           pk_column->get_column_name_str().length(),
                                           pk_column->get_column_name_str().ptr(),
-                                          request_id.length(), request_id.ptr(),
+                                          request_column_len, request_column,
                                           pk_column->get_column_name_str().length(),
                                           pk_column->get_column_name_str().ptr(),
                                           pk_column->get_column_name_str().length(),

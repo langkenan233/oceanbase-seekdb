@@ -700,6 +700,9 @@ int ObUpdateResolver::mark_ai_columns_for_update(ObIArray<ObTableAssignment> &ta
   if (OB_ISNULL(stmt) || OB_ISNULL(session_info_) || OB_ISNULL(params_.expr_factory_)) {
     ret = OB_ERR_UNEXPECTED;
     SQL_RESV_LOG(WARN, "invalid update resolver state", K(ret));
+  } else if (session_info_->is_ai_column_access()) {
+    // The statements this machinery runs on its own behalf write the AI columns
+    // themselves, so they must not mark what they are filling in.
   } else if (1 != stmt->get_table_size() || 1 != table_assigns.count()) {
     // A multi table update does not map to one row per table, so its AI columns
     // are left alone.
@@ -733,8 +736,22 @@ int ObUpdateResolver::mark_ai_columns_for_update(ObIArray<ObTableAssignment> &ta
       }
     }
     ObTableAssignment &table_assign = table_assigns.at(0);
+    // An update that writes an AI column itself is the one that produces the
+    // value, so it must leave that column alone instead of clearing it again.
+    bool writes_ai_column = false;
+    for (int64_t i = 0; OB_SUCC(ret) && !writes_ai_column
+                        && i < table_assign.assignments_.count(); ++i) {
+      const ObAssignment &assign = table_assign.assignments_.at(i);
+      const ObColumnSchemaV2 *changed = NULL;
+      if (OB_ISNULL(assign.column_expr_)) {
+      } else if (OB_NOT_NULL(changed =
+                     table_schema->get_column_schema(assign.column_expr_->get_column_id()))
+                 && changed->is_ai_column()) {
+        writes_ai_column = true;
+      }
+    }
     for (ObTableSchema::const_column_iterator iter = table_schema->column_begin();
-         OB_SUCC(ret) && iter != table_schema->column_end(); ++iter) {
+         OB_SUCC(ret) && !writes_ai_column && iter != table_schema->column_end(); ++iter) {
       const ObColumnSchemaV2 *ai_column = *iter;
       ObString ai_def;
       if (OB_ISNULL(ai_column) || !ai_column->is_ai_column()
@@ -794,6 +811,11 @@ int ObUpdateResolver::mark_ai_columns_for_update(ObIArray<ObTableAssignment> &ta
                                                   *table_item,
                                                   *state_column,
                                                   1,
+                                                  request_id))) {
+      } else if (OB_FAIL(add_ai_column_assignment(table_assign,
+                                                  *table_item,
+                                                  *request_column,
+                                                  2,
                                                   request_id))) {
       }
     }

@@ -352,7 +352,10 @@ public:
   {}
    virtual ~ObAIFuncModel() {}
    // completion
-   int call_completion(ObString &prompt, ObJsonObject *config, ObString &result);
+   // The system prompt is optional; an empty one leaves the request without a
+   // system message, which is what a plain AI_COMPLETE call does.
+   int call_completion(ObString &prompt, ObJsonObject *config, ObString &result,
+                       const ObString &system_prompt = ObString());
    int call_completion_vector(ObArray<ObString> &prompts, ObJsonObject *config, ObArray<ObString> &results);
    // dense_embedding
    int call_dense_embedding(ObString &content, ObJsonObject *config, ObString &result);
