@@ -547,6 +547,37 @@ bool ObColumnSchemaV2::get_ai_column_def(ObString &def) const
   return found;
 }
 
+bool ObColumnSchemaV2::is_ai_column_def_entry(const ObString &info)
+{
+  const int64_t prefix_len = static_cast<int64_t>(STRLEN(AI_COLUMN_DEF_PREFIX));
+  return info.length() > prefix_len
+         && 0 == MEMCMP(info.ptr(), AI_COLUMN_DEF_PREFIX, prefix_len);
+}
+
+int ObColumnSchemaV2::get_collection_type_info(ObString &info) const
+{
+  int ret = OB_SUCCESS;
+  int64_t found = 0;
+  for (int64_t i = 0; OB_SUCC(ret) && i < extended_type_info_.count(); ++i) {
+    const ObString &item = extended_type_info_.at(i);
+    if (is_ai_column_def_entry(item)) {
+      // the AI definition is not part of the collection type
+    } else if (++found > 1) {
+      ret = OB_ERR_UNEXPECTED;
+      SHARE_SCHEMA_LOG(WARN, "collection column has more than one type info", K(ret),
+                       K(get_column_name_str()), K(extended_type_info_));
+    } else {
+      info = item;
+    }
+  }
+  if (OB_SUCC(ret) && 0 == found) {
+    ret = OB_ERR_UNEXPECTED;
+    SHARE_SCHEMA_LOG(WARN, "collection column has no type info", K(ret),
+                     K(get_column_name_str()), K(extended_type_info_));
+  }
+  return ret;
+}
+
 int ObColumnSchemaV2::add_type_info(const ObString &type_info)
 {
   return add_string_to_array(type_info, extended_type_info_);

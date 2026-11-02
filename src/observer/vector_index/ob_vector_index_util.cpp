@@ -1733,14 +1733,23 @@ int ObVectorIndexUtil::get_vector_dim_from_extend_type_info(const ObIArray<ObStr
   int ret = OB_SUCCESS;
   is_sparse_vec_col = false;
 
-  if (extend_type_info.count() != 1) {
+  // An AI column keeps its definition in the same array, so count the entries
+  // that describe the collection itself.
+  int64_t type_info_cnt = 0;
+  ObString type_info;
+  for (int64_t i = 0; i < extend_type_info.count(); ++i) {
+    if (!ObColumnSchemaV2::is_ai_column_def_entry(extend_type_info.at(i))) {
+      ++type_info_cnt;
+      type_info = extend_type_info.at(i);
+    }
+  }
+  if (type_info_cnt != 1) {
     // sparse vector index columns currently only support single column vector indexes.
     // When building the vector column of the auxiliary table, only one column of extend_type_info is assigned.
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "create vector index on more than one column is");
   } else {
-    ObString str = extend_type_info.at(0);
-    is_sparse_vec_col = (0 == str.compare("SPARSEVECTOR"));
+    is_sparse_vec_col = (0 == type_info.compare("SPARSEVECTOR"));
   }
 
   return ret;

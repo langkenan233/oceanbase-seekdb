@@ -311,6 +311,11 @@ int assign(const ObColumnSchemaV2 &src_schema);
   // enough to carry it through schema persistence.
   int set_ai_column_def(const common::ObString &def);
   bool get_ai_column_def(common::ObString &def) const;
+  // A vector AI column keeps its vector type string and the AI definition in the
+  // same array, so the readers of the collection type string must skip the AI
+  // element instead of assuming the array holds one element.
+  static bool is_ai_column_def_entry(const common::ObString &info);
+  int get_collection_type_info(common::ObString &info) const;
   inline bool has_column_flag(int64_t flag) const { return column_flags_ & flag; }
   inline int64_t get_column_flags() const { return column_flags_; }
   //these column flags must be stored in __all_column

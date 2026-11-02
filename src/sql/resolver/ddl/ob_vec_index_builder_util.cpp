@@ -2810,8 +2810,8 @@ int ObVecIndexBuilderUtil::generate_vec_ivf_column(
         } else if (OB_FAIL(column_schema.add_cascaded_column_id(tmp_col_schema->get_column_id()))) {
         } else if (OB_FAIL(databuff_printf(vec_expr_def, OB_MAX_DEFAULT_VALUE_LENGTH, def_pos, "`%s`, ", tmp_col_schema->get_column_name()))) {
         } else if (ObCollectionSQLType == obj_type) {
-          if (tmp_col_schema->get_extended_type_info().count() != 1) {
-            ret = OB_INVALID_ARGUMENT;
+          ObString src_type_info;
+          if (OB_FAIL(tmp_col_schema->get_collection_type_info(src_type_info))) {
           } else if (col_type == IVF_PQ_CENTER_IDS_COL) {
             // pq center ids col type is ARRAY(VARBINARY)
             if (OB_FAIL(extend_type_info.push_back(ObVecIndexBuilderUtil::IVF_PQ_CENTER_IDS_COL_TYPE_NAME))) {
@@ -2820,7 +2820,7 @@ int ObVecIndexBuilderUtil::generate_vec_ivf_column(
             // sq8 data col type is VECTOR(UTINYINT, <vec dim>)
             // NOTE(liyao): use tmp alloc since 'column_schema.set_extended_type_info' will deep copy
             ObSqlCollectionInfo tmp_type_info(tmp_alloc);
-            tmp_type_info.set_name(tmp_col_schema->get_extended_type_info().at(0));
+            tmp_type_info.set_name(src_type_info);
             if (OB_FAIL(tmp_type_info.parse_type_info())) {
             } else {
               ObCollectionArrayType *arr_type = static_cast<ObCollectionArrayType *>(tmp_type_info.collection_meta_);
@@ -2832,7 +2832,7 @@ int ObVecIndexBuilderUtil::generate_vec_ivf_column(
               }
             }
           } else {
-            if (OB_FAIL(extend_type_info.assign(tmp_col_schema->get_extended_type_info()))) {
+            if (OB_FAIL(extend_type_info.push_back(src_type_info))) {
             }
           }
         }

@@ -4872,10 +4872,10 @@ int ObRawExprUtils::init_column_expr_subschema(const share::schema::ObColumnSche
     }
   } else if (column_schema.is_collection()) {
     uint16_t subschema_id = 0;
-    if (OB_UNLIKELY(column_schema.get_extended_type_info().count() != 1)) {
-      ret = OB_ERR_UNEXPECTED;
+    ObString type_info;
+    if (OB_FAIL(column_schema.get_collection_type_info(type_info))) {
     } else if (OB_FAIL(exec_ctx->get_subschema_id_by_type_string(
-                                  column_schema.get_extended_type_info().at(0), subschema_id))) {
+                                  type_info, subschema_id))) {
     } else {
       column_expr.set_subschema_id(subschema_id);
     }

@@ -3543,11 +3543,19 @@ int ObResolverUtils::generate_subschema_id(ObSQLSessionInfo &session_info,
                                            uint16_t &subschema_id)
 {
   int ret = OB_SUCCESS;
+  int64_t type_info_cnt = 0;
+  ObString type_info;
+  for (int64_t i = 0; i < extended_type_info.count(); ++i) {
+    if (!share::schema::ObColumnSchemaV2::is_ai_column_def_entry(extended_type_info.at(i))) {
+      ++type_info_cnt;
+      type_info = extended_type_info.at(i);
+    }
+  }
   if (OB_ISNULL(session_info.get_cur_exec_ctx())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (extended_type_info.count() != 1) {
+  } else if (type_info_cnt != 1) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(session_info.get_cur_exec_ctx()->get_subschema_id_by_type_string(extended_type_info.at(0), subschema_id))) {
+  } else if (OB_FAIL(session_info.get_cur_exec_ctx()->get_subschema_id_by_type_string(type_info, subschema_id))) {
   }
   return ret;
 }
