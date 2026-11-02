@@ -63,6 +63,25 @@ const char *VALID_PROVIDERS[] = {
     LOG_WARN("unknown json key param", K(ret), K(elem.first)); \
   }
 
+// max_concurrency is the only numeric endpoint attribute, so it is read on its
+// own instead of going through the string macro above.
+#define EXTRACT_JSON_ELEM_CONCURRENCY(json_key, member) \
+      if (elem.first.case_compare(json_key) == 0) { \
+        int64_t concurrency = 0; \
+        if (elem.second->json_type() != ObJsonNodeType::J_INT) { \
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID; \
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr()); \
+          LOG_WARN("invalid json type", K(ret), K(elem.first), K(elem.second->json_type())); \
+        } else if (OB_FALSE_IT(concurrency = elem.second->get_int())) { \
+        } else if (concurrency < 1 || concurrency > ObAiModelEndpointInfo::MAX_CONCURRENCY_LIMIT) { \
+          ret = OB_AI_FUNC_PARAM_VALUE_INVALID; \
+          LOG_USER_ERROR(OB_AI_FUNC_PARAM_VALUE_INVALID, elem.first.length(), elem.first.ptr()); \
+          LOG_WARN("max concurrency out of range", K(ret), K(concurrency)); \
+        } else { \
+          member = concurrency; \
+        } \
+      } else
+
 int ObAiModelEndpointInfo::parse_from_json_base(common::ObArenaAllocator &allocator, const ObString &name, const ObIJsonBase &params_jbase)
 {
   int ret = OB_SUCCESS;
@@ -92,6 +111,7 @@ int ObAiModelEndpointInfo::deep_copy(
   } else if (OB_FAIL(ob_write_string(allocator, other.request_transform_fn_, request_transform_fn_))) {
   } else if (OB_FAIL(ob_write_string(allocator, other.response_transform_fn_, response_transform_fn_))) {
   }
+  max_concurrency_ = other.max_concurrency_;
   return ret;
 }
 
@@ -166,6 +186,7 @@ int ObAiModelEndpointInfo::merge_delta_endpoint(common::ObArenaAllocator &alloca
       EXTRACT_JSON_ELEM_STR("parameters", parameters_)
       EXTRACT_JSON_ELEM_STR("request_transform_fn", request_transform_fn_)
       EXTRACT_JSON_ELEM_STR("response_transform_fn", response_transform_fn_)
+      EXTRACT_JSON_ELEM_CONCURRENCY("max_concurrency", max_concurrency_)
       EXTRACT_JSON_ELEM_END()
     }
     iter.next();
