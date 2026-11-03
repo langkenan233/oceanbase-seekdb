@@ -176,6 +176,15 @@ public:
 
 private:
   ObFTDAT *dat_;
+  // A single input character is looked up once per active prefix hit, so the
+  // same one-character code is resolved several times in a row. Remember the
+  // last resolution; readers are created together with the per-call range dict
+  // and never shared between threads.
+  mutable const char *memo_ptr_ = nullptr;
+  mutable int32_t memo_len_ = 0;
+  mutable int32_t memo_code_ = 0;
+  mutable bool memo_found_ = false;
+  mutable bool memo_valid_ = false;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTDATReader);

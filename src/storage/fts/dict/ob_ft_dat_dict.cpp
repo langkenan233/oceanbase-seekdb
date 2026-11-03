@@ -260,9 +260,29 @@ int ObFTDATReader<DATA_TYPE>::match_with_hit(const ObString &ft_char,
 
   ObFTSingleWord word;
   word.set_word(ft_char.ptr(), ft_char.length());
-  if (OB_FAIL(dat_->get_map()->find(word, code)) && OB_ENTRY_NOT_EXIST != ret) {
-  } else if (OB_ENTRY_NOT_EXIST == ret) {
-    ret = OB_SUCCESS;
+  const int64_t char_len = ft_char.length();
+  if (memo_valid_ && memo_len_ == char_len
+      && 0 == MEMCMP(memo_ptr_, ft_char.ptr(), char_len)) {
+    // reused the code resolved for the same character
+    code = memo_code_;
+  } else {
+    const int find_ret = map->find(word, code);
+    if (OB_SUCCESS == find_ret || OB_ENTRY_NOT_EXIST == find_ret) {
+      memo_ptr_ = ft_char.ptr();
+      memo_len_ = static_cast<int32_t>(char_len);
+      memo_found_ = (OB_SUCCESS == find_ret);
+      memo_code_ = code;
+      memo_valid_ = true;
+      if (!memo_found_) {
+        ret = OB_SUCCESS;
+      }
+    } else {
+      ret = find_ret;
+    }
+  }
+
+  if (OB_FAIL(ret)) {
+  } else if (!memo_found_) {
     hit.set_unmatch();
   } else {
     if (&last_hit == &hit) {
