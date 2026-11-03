@@ -95,9 +95,15 @@ private:
     }
     range_dicts_.reset();
     range_alloc_.reset();
+    last_range_idx_ = -1;
   }
 
   int find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const;
+
+  // Compare one character with a range boundary word.
+  int compare_word(const ObString &word, const ObFTSingleWord &range_word) const;
+
+  static int cmp_word_bin(const ObString &word, const ObFTSingleWord &range_word);
 
 private:
   static constexpr int DEFAULT_KEY_PER_RANGE = 50000; // by estimated
@@ -106,6 +112,8 @@ private:
   ObArenaAllocator range_alloc_;
   ObVector<ObFTRange, ObArenaAllocator> range_dicts_;
   ObFTCacheRangeContainer *range_container_; // only used to read cache
+  // Range that served the previous lookup, -1 before the first one.
+  mutable int64_t last_range_idx_ = -1;
 
 private:
   DISALLOW_COPY_AND_ASSIGN(ObFTRangeDict);

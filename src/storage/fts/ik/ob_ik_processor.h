@@ -45,20 +45,40 @@ public:
 
   int compound(ObIKToken &result);
 
-  int current_char(const char *&ch, uint8_t &char_len);
-  int current_char_type(ObFTCharUtil::CharType &type);
+  int current_char(const char *&ch, uint8_t &char_len)
+  {
+    int ret = OB_SUCCESS;
+    if (cursor_ >= fulltext_len_) {
+      ret = OB_ITER_END;
+    } else {
+      ch = fulltext_ + cursor_;
+      char_len = static_cast<uint8_t>(next_char_len_);
+    }
+    return ret;
+  }
+
+  int current_char_type(ObFTCharUtil::CharType &type)
+  {
+    int ret = OB_SUCCESS;
+    if (cursor_ >= fulltext_len_) {
+      ret = OB_ITER_END;
+    } else {
+      type = next_char_type_;
+    }
+    return ret;
+  }
 
   int step_next();
 
-  ObCollationType collation() const;
-  int64_t get_end_cursor() const;
-  const char *fulltext() const;
-  int64_t fulltext_len() const;
-  int64_t get_cursor() const;
+  ObCollationType collation() const { return coll_type_; }
+  int64_t get_end_cursor() const { return cursor_ + next_char_len_; }
+  const char *fulltext() const { return fulltext_; }
+  int64_t fulltext_len() const { return fulltext_len_; }
+  int64_t get_cursor() const { return cursor_; }
 
-  bool is_last() const;
-  bool iter_end() const;
-  bool is_smart() const;
+  bool is_last() const { return cursor_ + next_char_len_ >= fulltext_len_; }
+  bool iter_end() const { return cursor_ >= fulltext_len_; }
+  bool is_smart() const { return is_smart_; }
 
   int add_chain(ObIKTokenChain *chain);
   int add_token(const char *fulltext,
@@ -100,8 +120,6 @@ public:
   ObIIKProcessor() {}
 
   virtual ~ObIIKProcessor() {}
-
-  int process(TokenizeContext &ctx);
 
   virtual int do_process(TokenizeContext &ctx,
                          const char *ch,

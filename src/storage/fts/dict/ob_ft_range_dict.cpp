@@ -378,20 +378,51 @@ int ObFTRangeDict::match_with_hit(const ObString &single_word,
   return last_hit.dict_->match_with_hit(single_word, last_hit, hit);
 }
 
+int ObFTRangeDict::cmp_word_bin(const ObString &word, const ObFTSingleWord &range_word)
+{
+  const int64_t cmp_len = MIN(word.length(), static_cast<int64_t>(range_word.word_len));
+  int cmp = (cmp_len > 0) ? MEMCMP(word.ptr(), range_word.word, cmp_len) : 0;
+  if (0 == cmp) {
+    cmp = (word.length() == range_word.word_len) ? 0
+          : (word.length() < range_word.word_len ? -1 : 1);
+  }
+  return cmp;
+}
+
+int ObFTRangeDict::compare_word(const ObString &word, const ObFTSingleWord &range_word) const
+{
+  int cmp = 0;
+  if (ObCollationType::CS_TYPE_UTF8MB4_BIN == desc_.coll_type_) {
+    // Binary collation compares code points, which is the byte order of utf8mb4.
+    cmp = cmp_word_bin(word, range_word);
+  } else {
+    cmp = ObCharset::strcmp(desc_.coll_type_, range_word.get_word(), word);
+  }
+  return cmp;
+}
+
 int ObFTRangeDict::find_first_char_range(const ObString &single_word, ObIFTDict *&dict) const
 {
   int ret = OB_SUCCESS;
   bool found = false;
-  for (int i = 0; OB_SUCC(ret) && !found && i < range_dicts_.size(); ++i) {
-    if (ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                          range_dicts_[i].start_.get_word(),
-                          single_word)
-            <= 0
-        && ObCharset::strcmp(ObCollationType::CS_TYPE_UTF8MB4_BIN,
-                             range_dicts_[i].end_.get_word(),
-                             single_word)
-               >= 0) {
+  const int64_t range_cnt = range_dicts_.size();
+
+  // Consecutive characters of one script usually fall in the same range, so
+  // probe the range that matched last before scanning all of them.
+  if (last_range_idx_ >= 0 && last_range_idx_ < range_cnt) {
+    const ObFTRange &range = range_dicts_[last_range_idx_];
+    if (compare_word(single_word, range.start_) >= 0
+        && compare_word(single_word, range.end_) <= 0) {
+      dict = range.dict_;
+      found = true;
+    }
+  }
+
+  for (int64_t i = 0; OB_SUCC(ret) && !found && i < range_cnt; ++i) {
+    if (compare_word(single_word, range_dicts_[i].start_) >= 0
+        && compare_word(single_word, range_dicts_[i].end_) <= 0) {
       dict = range_dicts_[i].dict_;
+      last_range_idx_ = i;
       found = true;
     }
   }
