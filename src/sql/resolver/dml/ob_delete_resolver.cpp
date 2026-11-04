@@ -481,6 +481,8 @@ int ObDeleteResolver::drop_ai_column_tasks()
       if (OB_SUCC(ret)) {
         if (OB_FAIL(session_info_->get_ai_dml_post_sql().assign(sql))) {
           LOG_WARN("store ai column cleanup sql failed", K(ret));
+        } else if (OB_NOT_NULL(params_.query_ctx_)) {
+          params_.query_ctx_->has_ai_column_dml_ = true;
         }
       }
     }

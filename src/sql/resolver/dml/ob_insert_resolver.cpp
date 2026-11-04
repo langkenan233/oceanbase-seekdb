@@ -1238,6 +1238,8 @@ int ObInsertResolver::mark_ai_columns_for_insert()
                                           request_id,
                                           true))) {
         LOG_WARN("build ai column dml sql failed", K(ret));
+      } else if (OB_NOT_NULL(params_.query_ctx_)) {
+        params_.query_ctx_->has_ai_column_dml_ = true;
       }
     }
   }

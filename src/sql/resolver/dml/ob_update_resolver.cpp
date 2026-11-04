@@ -835,6 +835,8 @@ int ObUpdateResolver::mark_ai_columns_for_update(ObIArray<ObTableAssignment> &ta
                                           request_id,
                                           false))) {
         SQL_RESV_LOG(WARN, "build ai column dml sql failed", K(ret));
+      } else if (OB_NOT_NULL(params_.query_ctx_)) {
+        params_.query_ctx_->has_ai_column_dml_ = true;
       }
     }
   }

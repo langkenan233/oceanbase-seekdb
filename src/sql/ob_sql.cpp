@@ -2773,6 +2773,13 @@ int ObSql::code_generate(
     ObPhyPlanHint phy_hint(logical_plan->get_optimizer_context().get_global_hint());
     if (OB_USE_PLAN_CACHE_NONE == plan_cache_policy) {
       phy_hint.plan_cache_policy_ = OB_USE_PLAN_CACHE_NONE;
+    } else if (stmt->get_query_ctx()->has_ai_column_dml()) {
+      // The statement that queues the AI column work is built while this
+      // statement is resolved, so a plan taken from the plan cache would run
+      // without it. Keeping the plan out of the cache makes every execution
+      // resolve again, and a batched statement falls back to one row at a
+      // time, which is the path this machinery expects.
+      phy_hint.plan_cache_policy_ = OB_USE_PLAN_CACHE_NONE;
     }
     // set larger query_time for IS
     if (stmt->get_query_ctx()->has_is_table_) {
