@@ -105,16 +105,20 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  // The AI column is cleared by this statement as an implicit assignment, so it
+  // has to be in the list before the cascading columns are derived from it.
+  // An AI column under a vector index otherwise loses the columns the index
+  // keeps in step with it, and the old vector stays in the index.
   if (OB_SUCC(ret)) {
-    // Parse cascading update columns
-    if (OB_FAIL(resolve_additional_assignments(tables_assign,
-                                               T_UPDATE_SCOPE))) {
+    if (OB_FAIL(mark_ai_columns_for_update(tables_assign))) {
+      SQL_RESV_LOG(WARN, "mark ai columns for update failed", K(ret));
     }
   }
 
   if (OB_SUCC(ret)) {
-    if (OB_FAIL(mark_ai_columns_for_update(tables_assign))) {
-      SQL_RESV_LOG(WARN, "mark ai columns for update failed", K(ret));
+    // Parse cascading update columns
+    if (OB_FAIL(resolve_additional_assignments(tables_assign,
+                                               T_UPDATE_SCOPE))) {
     }
   }
 
